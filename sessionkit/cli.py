@@ -293,9 +293,16 @@ def cmd_files(corpus: Corpus, args: argparse.Namespace) -> str:
         if entry is None:
             raise SystemExit(f"no session matching {args.sid!r} (try `sk index`)")
         rows = query.file_rows(entry)
+        note = ""
+        if args.uncommitted:
+            dirty, note = query.uncommitted_intersection(
+                entry.session.cwd, [r["path"] for r in rows])
+            rows = [r for r in rows if r["path"] in dirty]
         report = Report(args.json, args.budget_kb or BUDGET_AGGREGATE_KB)
         report.meta(sid=entry.session.sid, project=entry.project_key,
                     cwd=entry.session.cwd, paths=len(rows))
+        if args.uncommitted:
+            report.meta(uncommitted=len(rows))
         report.section("Files")
         report.table(
             ["path", "reads", "writes", "edits", "first_line", "last_line"],
@@ -303,11 +310,35 @@ def cmd_files(corpus: Corpus, args: argparse.Namespace) -> str:
               r["first_line"], r["last_line"]] for r in rows],
             key="files",
         )
+        if note:
+            report.text(f"git join: {note}")
         return report.render()
 
     rows = query.file_project_rows(corpus, _scope(args))
+    notes: list[str] = []
+    if args.uncommitted:
+        cwd_of: dict[str, str] = {}
+        for r in rows:
+            sid = r["exemplar_sid"]
+            if sid not in cwd_of:
+                exemplar = query.find_session(corpus, sid)
+                cwd_of[sid] = exemplar.session.cwd if exemplar else ""
+        by_cwd: dict[str, list[str]] = {}
+        for r in rows:
+            by_cwd.setdefault(cwd_of[r["exemplar_sid"]], []).append(r["path"])
+        dirty_all: set[str] = set()
+        for cwd, paths in by_cwd.items():
+            if not cwd:
+                continue
+            dirty, note = query.uncommitted_intersection(cwd, paths)
+            dirty_all |= dirty
+            if note:
+                notes.append(note)
+        rows = [r for r in rows if r["path"] in dirty_all]
     report = Report(args.json, args.budget_kb or BUDGET_AGGREGATE_KB)
     report.meta(paths=len(rows), project=args.project or "any")
+    if args.uncommitted:
+        report.meta(uncommitted=len(rows))
     report.section("Files across scope")
     report.table(
         ["path", "sessions", "reads", "writes", "edits", "exemplar_sid"],
@@ -315,6 +346,8 @@ def cmd_files(corpus: Corpus, args: argparse.Namespace) -> str:
           r["exemplar_sid"][:8]] for r in rows],
         key="files",
     )
+    if notes:
+        report.text(f"git join: {'; '.join(sorted(set(notes)))}")
     return report.render()
 
 
@@ -527,6 +560,8 @@ def build_parser() -> argparse.ArgumentParser:
                              help="files a session (or scope) touched")
     p_files.add_argument("sid", nargs="?", default=None,
                          help="session id or unique prefix; omit for a project rollup")
+    p_files.add_argument("--uncommitted", action="store_true",
+                         help="intersect with `git status --porcelain` in the session's cwd")
     _subagents_arg(p_files, "include")
     return parser
 

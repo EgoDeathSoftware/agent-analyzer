@@ -13,7 +13,10 @@ from __future__ import annotations
 
 import fnmatch
 import json
+import os
+import subprocess
 from dataclasses import dataclass
+from pathlib import PurePath
 from typing import Any, Callable, Iterable
 
 from sessionkit import settingsjson as sj
@@ -427,6 +430,56 @@ def file_project_rows(corpus: Corpus, scope: Filter) -> list[Row]:
     return sorted(out, key=lambda r: (-r["sessions"],
                                       -(r["reads"] + r["writes"] + r["edits"]),
                                       r["path"]))
+
+
+_GIT_STATUS_ARGV = (
+    "git", "status", "--porcelain=v1", "-z", "--untracked-files=normal",
+)
+
+
+def uncommitted_intersection(cwd: str, paths: list[str]) -> tuple[set[str], str]:
+    """Return the subset of ``paths`` that are dirty in ``cwd``'s git tree.
+
+    Uses a fixed argv so the call cannot mutate the tree, index, config or refs. Any
+    non-zero exit is treated as "not a repo" or a similarly benign local condition —
+    callers get an empty set and a short note rather than an exception. ``LC_ALL``/``LANG``
+    are pinned to ``C`` so the "not a git repository" stderr match is locale-independent.
+    """
+    env = {"PATH": os.environ.get("PATH", ""), "HOME": os.environ.get("HOME", ""),
+           "LC_ALL": "C", "LANG": "C"}
+    try:
+        completed = subprocess.run(
+            _GIT_STATUS_ARGV, cwd=cwd, check=False, timeout=15,
+            capture_output=True, env=env,
+        )
+    except FileNotFoundError:
+        return (set(), "git binary not found")
+    except subprocess.TimeoutExpired:
+        return (set(), "git status timed out")
+    if completed.returncode != 0:
+        stderr = completed.stderr.lower()
+        if b"not a git repository" in stderr:
+            return (set(), "not a git repo")
+        return (set(), f"git status failed (exit {completed.returncode})")
+    dirty_rel: set[str] = set()
+    # Porcelain -z separates entries with NUL; each entry is `XY <space> path`.
+    # Renames are `XY <space> new-path NUL old-path NUL`; both land as separate
+    # split segments here, but only the new path is needed for the intersection.
+    payload = completed.stdout.decode("utf-8", errors="replace")
+    for entry in payload.split("\x00"):
+        if len(entry) < 4:
+            continue
+        dirty_rel.add(entry[3:])
+    session_rels = {p: _relative_to(cwd, p) for p in paths}
+    return ({p for p, rel in session_rels.items() if rel in dirty_rel}, "")
+
+
+def _relative_to(cwd: str, path: str) -> str:
+    """Best-effort cwd-relative path, tolerant of absolute forms outside ``cwd``."""
+    try:
+        return str(PurePath(path).relative_to(PurePath(cwd)))
+    except ValueError:
+        return path
 
 
 # --- commands -----------------------------------------------------------------------------
