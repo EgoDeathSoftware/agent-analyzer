@@ -246,6 +246,8 @@ def cmd_tail(corpus: Corpus, args: argparse.Namespace) -> str:
     Judgment about `done vs unfinished` lives in the `unfinished-work` skill; this command
     surfaces the material and one deterministic classification, nothing more.
     """
+    if getattr(args, "all", False):
+        return _cmd_tail_all(corpus, args)
     entry = query.find_session(corpus, args.sid)
     if entry is None:
         raise SystemExit(f"no session matching {args.sid!r} (try `sk index`)")
@@ -260,6 +262,27 @@ def cmd_tail(corpus: Corpus, args: argparse.Namespace) -> str:
                  [[r["line"], r["role"], r["chars"], r["preview"]]
                   for r in query.tail_rows(entry, n=args.n, full=args.full)],
                  key="tail")
+    return report.render()
+
+
+def _cmd_tail_all(corpus: Corpus, args: argparse.Namespace) -> str:
+    """Corpus scan: every non-complete, non-live session, with its tail signal."""
+    candidates = query.tail_candidates(corpus, _scope(args))
+    report = Report(args.json, args.budget_kb or BUDGET_AGGREGATE_KB, full=args.full)
+    report.meta(candidates=len(candidates), n=args.n)
+    report.section("Candidates (non-complete, not currently running)")
+    rows: list[list] = []
+    for entry in candidates:
+        signal = query.tail_signal(entry, n=args.n)
+        last = entry.session.messages[-1] if entry.session.messages else None
+        excerpt = ""
+        if last is not None:
+            tail_texts = query.tail_context(entry, n=1)
+            excerpt = tail_texts.get(last.line, last.preview or "")
+        rows.append([entry.session.sid[:8], entry.session.end_state, signal,
+                     (entry.session.ended_at or "")[:16], excerpt])
+    report.table(["sid", "state", "tail_signal", "ended", "tail_excerpt"], rows,
+                 key="candidates")
     return report.render()
 
 
@@ -453,14 +476,20 @@ def build_parser() -> argparse.ArgumentParser:
                                  help="why one session went wrong (layer 3)")
     p_forensics.add_argument("sid", help="session id or unique prefix")
 
-    p_tail = sub.add_parser("tail", parents=[common],
+    p_tail = sub.add_parser("tail", parents=[common, scoped],
                             help="last N turns of one session, with a tail signal")
-    p_tail.add_argument("sid", help="session id or unique prefix")
+    group = p_tail.add_mutually_exclusive_group(required=True)
+    group.add_argument("sid", nargs="?", default=None,
+                       help="session id or unique prefix")
+    group.add_argument("--all", action="store_true",
+                       help="scan every non-complete session in scope (excludes live "
+                            "sessions from `sessions/*.json`)")
     p_tail.add_argument("--n", type=int, default=6,
                         help="number of trailing turns to include (default: 6)")
     p_tail.add_argument("--full", action="store_true",
                         help="re-read message text from source for full fidelity "
                              "(JSON never truncates a cell either way)")
+    _subagents_arg(p_tail, "include")
     return parser
 
 

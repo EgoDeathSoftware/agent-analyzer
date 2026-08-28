@@ -338,6 +338,20 @@ def tail_signal(entry: Loaded, n: int = 6) -> str:
     return signal
 
 
+def tail_candidates(corpus: Corpus, scope: Filter,
+                    *, exclude_live: bool = True) -> list[Loaded]:
+    """Sessions eligible for `sk tail --all`: not `complete`, and not currently running."""
+    from sessionkit import live, sources as src_mod
+    live_set: set[str] = set()
+    if exclude_live:
+        roots = {s.root for s in src_mod.discover() if s.reachable}
+        live_set = live.live_sids(roots)
+    return [
+        entry for entry in scope.apply(corpus)
+        if entry.session.end_state != "complete" and entry.session.sid not in live_set
+    ]
+
+
 def tail_rows(entry: Loaded, n: int = 6, full: bool = False) -> list[Row]:
     """Row shape for `sk tail <sid>`: last N messages plus their trailing tool calls."""
     tail = entry.session.messages[-n:] if n > 0 else entry.session.messages

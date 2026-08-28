@@ -78,5 +78,55 @@ class TailSessionScoped(unittest.TestCase):
         self.assertEqual(payload["tail_signal"], "completion_marker")
 
 
+class TailCorpusScoped(TailSessionScoped):
+    def _mid_tool_transcript(self, sid: str) -> None:
+        # Assistant turn issues a Bash tool_use with no matching tool_result.
+        # `sessionId` is fixed to `fx.SID` on every fixture record; the parser locks onto the
+        # *first* record's sessionId, so it must be overridden here for the report's per-row
+        # sid to reflect this transcript rather than colliding with every other fixture's.
+        fx.write(self.home, [
+            fx.user("run something", sessionId=sid),
+            fx.assistant([fx.tool_use("t1", "Bash", {"command": "sleep 60"})]),
+        ], name=f"{sid}.jsonl")
+
+    def _complete_transcript(self, sid: str) -> None:
+        fx.write(self.home, [
+            fx.user("add a feature", sessionId=sid),
+            fx.assistant([fx.tool_use("t1", "Read", {"file_path": "/home/dev/myproject/a.py"})]),
+            fx.tool_result("t1", "file contents"),
+            fx.assistant([{"type": "text", "text": "done"}], ts="2026-08-01T00:00:04Z"),
+        ], name=f"{sid}.jsonl")
+
+    def test_all_lists_non_complete_sessions_only(self) -> None:
+        self._complete_transcript("aaaa1111")
+        self._mid_tool_transcript("bbbb2222")  # interrupted-tool
+        out = self._run("tail", "--all", "--json")
+        payload = json.loads(out)
+        sids = [row["sid"] for row in payload["candidates"]]
+        self.assertIn("bbbb2222"[:8], sids)
+        self.assertNotIn("aaaa1111"[:8], sids)
+
+    def test_all_excludes_live_sessions(self) -> None:
+        self._mid_tool_transcript("bbbb2222")
+        with mock.patch.dict(os.environ, {"SESSIONKIT_LIVE_SIDS": "bbbb2222"}):
+            out = self._run("tail", "--all", "--json")
+        payload = json.loads(out)
+        self.assertEqual(payload["candidates"], [],
+                         "a live session must not appear as unfinished work")
+
+    def test_all_row_has_tail_signal(self) -> None:
+        self._mid_tool_transcript("bbbb2222")
+        out = self._run("tail", "--all", "--json")
+        payload = json.loads(out)
+        row = payload["candidates"][0]
+        self.assertEqual(row["tail_signal"], "mid_tool")
+
+    def test_all_emits_omitted_count_when_budget_forces_drops(self) -> None:
+        for sid_suffix in "abcdef":
+            self._mid_tool_transcript(sid_suffix * 8)
+        out = self._run("tail", "--all", "--budget-kb", "0.4")
+        self.assertIn("more row(s) omitted", out)
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
