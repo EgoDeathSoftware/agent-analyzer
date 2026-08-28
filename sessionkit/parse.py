@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -56,6 +57,7 @@ class ToolCall:
     line: int
     name: str
     ts: str
+    result_line: int = 0
     result_ts: str = ""
     dur_ms: int | None = None
     is_error: bool = False
@@ -92,6 +94,7 @@ class FileOp:
     op: str
     ts: str
     tool_use_id: str
+    line: int = 0
 
 
 @dataclass
@@ -146,6 +149,7 @@ class ParsedSession:
     attach: list[Attach] = field(default_factory=list)
     end_state: str = "unknown"
     end_reason: str = ""
+    dispatch_edges: list[tuple[str, str]] = field(default_factory=list)
 
 
 def basename_of(path: str) -> str:
@@ -182,6 +186,25 @@ def block_text(content: Any) -> str:
         elif isinstance(block, dict):
             parts.append(str(block.get("text") or block.get("thinking") or ""))
     return "\n".join(p for p in parts if p)
+
+
+#: A background-agent dispatch resolves through a record carrying both the child's own sid
+#: (<task-id>) and the tool_use_id of the Agent call that dispatched it (<tool-use-id>) — see
+#: docs/superpowers/plans/2026-08-28-firstrun-fixes.md Task 3 for the exact join this feeds.
+_TASK_NOTIF_RE = re.compile(
+    r"<task-id>([^<]+)</task-id>\s*<tool-use-id>([^<]+)</tool-use-id>", re.S)
+
+
+def _flatten_strings(value: Any) -> str:
+    """Every string value in a JSON-decoded structure, joined — enough to regex-scan a record
+    without knowing which field holds the text of interest."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        return " ".join(_flatten_strings(v) for v in value.values())
+    if isinstance(value, list):
+        return " ".join(_flatten_strings(v) for v in value)
+    return ""
 
 
 def digest(value: Any) -> str:
@@ -308,7 +331,7 @@ class _Parser:
         for key in PATH_KEYS:
             value = raw_input.get(key)
             if isinstance(value, str) and value:
-                self.out.files.append(FileOp(value, op, ts, call.tool_use_id))
+                self.out.files.append(FileOp(value, op, ts, call.tool_use_id, call.line))
                 return
 
     def _user(self, line_no: int, rec: dict[str, Any]) -> None:
@@ -318,7 +341,7 @@ class _Parser:
             return
         ts = str(rec.get("timestamp") or "")
         content = msg.get("content")
-        results = self._tool_results(ts, content)
+        results = self._tool_results(line_no, ts, content)
         if results:
             return  # a results-only turn is transport, not a prompt
 
@@ -332,7 +355,7 @@ class _Parser:
             text_len=len(text), preview=preview(text, MSG_PREVIEW),
         ))
 
-    def _tool_results(self, ts: str, content: Any) -> int:
+    def _tool_results(self, line_no: int, ts: str, content: Any) -> int:
         """Pair ``tool_result`` blocks with their pending calls. Returns how many were found."""
         if not isinstance(content, list):
             return 0
@@ -346,6 +369,7 @@ class _Parser:
                 continue
             body = block_text(block.get("content"))
             call.result_ts = ts
+            call.result_line = line_no
             call.dur_ms = _delta_ms(call.ts, ts)
             call.is_error = bool(block.get("is_error"))
             call.out_bytes = len(body)
@@ -430,12 +454,37 @@ def parse_file(path: Path, source_id: str) -> ParsedSession:
             sid_seen = sid_seen or str(rec.get("sessionId") or "")
             agent_seen = agent_seen or str(rec.get("agentId") or "")
             parser.feed(line_no, rec)
+            if "<task-notification" in line:
+                for task_id, tool_use_id in _TASK_NOTIF_RE.findall(_flatten_strings(rec)):
+                    parser.out.dispatch_edges.append((tool_use_id.strip(), task_id.strip()))
     out = parser.finish()
     # A subagent is identified by its agentId; its sessionId belongs to the parent.
     out.sid = agent_seen or sid_seen or out.sid
     if out.is_subagent:
         out.agent_type = _agent_type(path)
     return out
+
+
+def read_line(path: str, line_no: int) -> dict[str, Any] | None:
+    """Re-read one exact transcript line, bypassing every in-memory preview cap.
+
+    ``--full`` needs the original record — ``input_preview``/``output_preview``/``preview`` are
+    the only copies kept in memory, each capped, and a preview built from an already-serialised
+    JSON string can be cut mid-escape (docs/superpowers/plans/2026-08-28-firstrun-fixes.md
+    Task 5). Re-reading the source line is the only way to recover the true text.
+    """
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as handle:
+            for i, line in enumerate(handle, start=1):
+                if i == line_no:
+                    try:
+                        rec = json.loads(line)
+                    except json.JSONDecodeError:
+                        return None
+                    return rec if isinstance(rec, dict) else None
+    except OSError:
+        return None
+    return None
 
 
 def _agent_type(path: Path) -> str:

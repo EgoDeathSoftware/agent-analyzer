@@ -19,7 +19,8 @@ from typing import Any, Callable, Iterable
 from sessionkit import settingsjson as sj
 from sessionkit.classify import ANOMALY_HINTS, signature
 from sessionkit.corpus import Corpus, Loaded
-from sessionkit.parse import ToolCall
+from sessionkit.parse import ToolCall, block_text, read_line
+from sessionkit.redact import redact
 
 Row = dict[str, Any]
 
@@ -36,13 +37,15 @@ def is_failure(tool: ToolCall) -> bool:
 
 @dataclass
 class Filter:
-    """The shared scope flags: ``--since``/``--project``/``--source``/``--state``."""
+    """The shared scope flags: ``--since``/``--project``/``--source``/``--state``/
+    ``--label-contains``."""
 
     cutoff: str = ""
     project: str = ""
     source: str = ""
     state: str = ""
     subagents: str = "include"
+    label_contains: str = ""
 
     def matches(self, entry: Loaded) -> bool:
         """Whether a session is in scope."""
@@ -59,6 +62,10 @@ class Filter:
             return False
         if self.subagents == "only" and not session.is_subagent:
             return False
+        if self.label_contains:
+            label = (session.title or session.first_prompt or "").lower()
+            if self.label_contains.lower() not in label:
+                return False
         return True
 
     def apply(self, corpus: Corpus) -> list[Loaded]:
@@ -126,6 +133,8 @@ def index_rows(corpus: Corpus, scope: Filter) -> list[Row]:
             "end_state": s.end_state,
             "model": s.model,
             "label": s.title or s.first_prompt,
+            "parent_sid": s.parent_sid,
+            "agent_type": s.agent_type,
         })
     return out
 
@@ -285,22 +294,61 @@ def timeline_rows(entry: Loaded) -> list[Row]:
     return rows
 
 
-def message_rows(entry: Loaded, lo: int, hi: int) -> list[Row]:
+def _full_input(entry: Loaded, call: ToolCall) -> str:
+    """Re-read a tool call's true input from its source line (see parse.read_line)."""
+    rec = read_line(entry.session.path, call.line)
+    if rec is not None:
+        content = (rec.get("message") or {}).get("content")
+        if isinstance(content, list):
+            for block in content:
+                if (isinstance(block, dict) and block.get("type") == "tool_use"
+                        and block.get("id") == call.tool_use_id):
+                    return redact(json.dumps(block.get("input"), default=str))
+    return call.input_preview
+
+
+def _full_output(entry: Loaded, call: ToolCall) -> str:
+    """Re-read a tool result's true output from its source line."""
+    if not call.result_line:
+        return call.output_preview
+    rec = read_line(entry.session.path, call.result_line)
+    if rec is not None:
+        content = (rec.get("message") or {}).get("content")
+        if isinstance(content, list):
+            for block in content:
+                if (isinstance(block, dict) and block.get("type") == "tool_result"
+                        and block.get("tool_use_id") == call.tool_use_id):
+                    return redact(block_text(block.get("content")))
+    return call.output_preview
+
+
+def _full_message(entry: Loaded, message: Any) -> str:
+    """Re-read a message's true text from its source line."""
+    rec = read_line(entry.session.path, message.line)
+    if rec is None:
+        return message.preview
+    content = (rec.get("message") or {}).get("content")
+    return redact(block_text(content)) if content is not None else message.preview
+
+
+def message_rows(entry: Loaded, lo: int, hi: int, full: bool = False) -> list[Row]:
     """Messages within an inclusive line range."""
-    return [{"line": m.line, "role": m.role, "text_len": m.text_len, "preview": m.preview}
+    return [{"line": m.line, "role": m.role, "text_len": m.text_len,
+             "preview": _full_message(entry, m) if full else m.preview}
             for m in entry.session.messages if lo <= m.line <= hi]
 
 
-def tool_rows(entry: Loaded) -> list[Row]:
+def tool_rows(entry: Loaded, full: bool = False) -> list[Row]:
     """Every tool call in the session, in line order."""
     return [{"line": t.line, "name": t.name, "dur_ms": t.dur_ms, "err_class": t.err_class,
-             "input_preview": t.input_preview} for t in entry.session.tools]
+             "input_preview": _full_input(entry, t) if full else t.input_preview}
+            for t in entry.session.tools]
 
 
-def error_rows(entry: Loaded) -> list[Row]:
+def error_rows(entry: Loaded, full: bool = False) -> list[Row]:
     """Only the failing tool calls."""
     return [{"line": t.line, "name": t.name, "err_class": t.err_class,
-             "output_preview": t.output_preview}
+             "output_preview": _full_output(entry, t) if full else t.output_preview}
             for t in entry.session.tools if is_failure(t)]
 
 
@@ -514,3 +562,45 @@ def forensics_health(entry: Loaded) -> Row:
     tools = entry.session.tools
     failed = sum(1 for t in tools if is_failure(t))
     return {"tool_calls": len(tools), "failed": failed, "succeeded": len(tools) - failed}
+
+
+# --- children ---------------------------------------------------------------------------
+
+def children_rows(entry: Loaded, corpus: Corpus) -> list[Row]:
+    """Every ``Agent`` dispatch from one session, resolved to its child via the exact
+    task-notification join (``parse.py``'s ``dispatch_edges``) — never by timestamp or dispatch
+    order, which FIRSTRUN.md §8 found silently mispairs retries and non-adjacent completions.
+
+    A dispatch with no matching notification is reported as unresolved rather than guessed.
+    """
+    edges = dict(entry.session.dispatch_edges)
+    by_sid = {c.session.sid: c for c in corpus.sessions if c.session.is_subagent}
+    out: list[Row] = []
+    for tool in entry.session.tools:
+        if tool.name != "Agent":
+            continue
+        task_id = edges.get(tool.tool_use_id, "")
+        child = by_sid.get(task_id) if task_id else None
+        out.append({
+            "line": tool.line,
+            "description": _agent_description(tool),
+            "child_sid": child.session.sid if child else "",
+            "resolved": child is not None,
+            "agent_type": child.session.agent_type if child else "",
+            "state": child.session.end_state if child else "",
+            "cost_usd": child.session.cost_usd if child else 0.0,
+            "project": child.project_key if child else "",
+        })
+    out.sort(key=lambda r: r["line"])
+    return out
+
+
+def _agent_description(tool: ToolCall) -> str:
+    """Best-effort dispatch description from an ``Agent`` call's input."""
+    try:
+        parsed = json.loads(tool.input_preview)
+    except (ValueError, TypeError):
+        return tool.input_preview
+    if isinstance(parsed, dict):
+        return str(parsed.get("description") or parsed.get("prompt") or tool.input_preview)
+    return tool.input_preview

@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from sessionkit.parse import basename_of, digest, parse_file, project_key
+from sessionkit.parse import basename_of, digest, parse_file, project_key, read_line
 from tests import fixtures as fx
 
 
@@ -70,6 +70,13 @@ class ParseTest(unittest.TestCase):
         self.assertEqual([(f.path, f.op) for f in session.files],
                          [("/a.py", "read"), ("/b.py", "edit")])
 
+    def test_file_operations_carry_their_line_number(self) -> None:
+        session = self.parse([
+            fx.user("go"),
+            fx.assistant([fx.tool_use("t1", "Read", {"file_path": "/a.py"})]),
+        ])
+        self.assertEqual(session.files[0].line, 2)  # the assistant record is JSONL line 2
+
     def test_accumulates_usage_and_cost(self) -> None:
         session = self.parse([
             fx.user("go"),
@@ -114,6 +121,18 @@ class ParseTest(unittest.TestCase):
         self.assertTrue(session.is_subagent)
         self.assertEqual(session.agent_type, "Explore")
 
+    def test_task_notification_records_a_dispatch_edge(self) -> None:
+        session = self.parse([
+            fx.user("go"),
+            fx.assistant([fx.tool_use("toolu_1", "Agent", {"description": "do work"})]),
+            fx.task_notification("toolu_1", "childsid123"),
+        ])
+        self.assertEqual(session.dispatch_edges, [("toolu_1", "childsid123")])
+
+    def test_no_dispatch_edges_when_no_notification_present(self) -> None:
+        session = self.parse(fx.simple_session())
+        self.assertEqual(session.dispatch_edges, [])
+
     def test_progress_records_become_system_events(self) -> None:
         path = fx.write_subagent(self.tmp, [
             fx.user("go"),
@@ -122,6 +141,22 @@ class ParseTest(unittest.TestCase):
         ])
         session = parse_file(path, "host")
         self.assertIn("hook_progress", [e.subtype for e in session.sysev])
+
+    def test_result_line_is_recorded_on_the_tool_call(self) -> None:
+        session = self.parse([
+            fx.user("go"),
+            fx.assistant([fx.tool_use("t1", "Bash", {"command": "ls"})]),
+            fx.tool_result("t1", "ok"),
+        ])
+        self.assertEqual(session.tools[0].result_line, 3)
+
+
+class ReadLineTest(unittest.TestCase):
+    def test_reads_exact_line_and_none_past_the_end(self) -> None:
+        path = fx.write(Path(tempfile.mkdtemp()), fx.simple_session(), name="aaaa1111.jsonl")
+        rec = read_line(str(path), 1)
+        self.assertEqual(rec["type"], "user")
+        self.assertIsNone(read_line(str(path), 999))
 
 
 class KeyTest(unittest.TestCase):

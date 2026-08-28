@@ -286,7 +286,7 @@ natural-language `--since`.
 
 ### 5.1 Commands
 
-**Shipped:** `doctor`, `index`, `show`, `errors`, `commands`, `hooks`, `forensics`.
+**Shipped:** `doctor`, `index`, `show`, `errors`, `commands`, `hooks`, `forensics`, `children`.
 
 **Planned (10):** `unfinished`, `search`, `cost`, `files`, `churn`, `stores`, `digest`,
 `plan-diff`, `corrections`, `procedures`.
@@ -608,6 +608,14 @@ paid for 2 KB" is itself the signal that spilling worked.
 - `--subagents` compares subagent cost against parent cost, **states the sample size** so a thin
   result isn't read as a conclusion, and applies the wasted-dispatch test: was the subagent's
   returned summary actually used by the parent, or discarded?
+- **The parent↔child edge is `parse.py`'s `dispatch_edges`** (built for `sk children`, Phases
+  0–2 addendum — see `docs/superpowers/plans/2026-08-28-firstrun-fixes.md` Task 3), joining each
+  `Agent` `ToolCall.tool_use_id` to its child's sid via the `<task-notification>` record. Do not
+  re-derive this by sorting children on completion time and zipping against dispatch order — that
+  approach silently mispairs retries and non-adjacent completions (`FIRSTRUN.md` §8, confirmed:
+  a wrong pairing put one task's cost on another task's row). Flag a non-`complete` child
+  (`killed`, `interrupted-user`, …) as **sunk cost** rather than folding it into the parent's
+  total undifferentiated — real spend with no surviving output is a distinct line, not noise.
 - `sk cost` for a given session matches the tracker UI's Costs tab **to the cent**. Both tables
   were corrected on 2026-08-26; this phase is where that agreement gets a regression test.
 - **And matches `~/.claude.json:lastModelUsage` for that session** (§3.2.2). The two hand-maintained

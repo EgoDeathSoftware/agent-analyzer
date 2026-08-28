@@ -73,6 +73,21 @@ def write_subagent(tmp: Path, records: list[dict[str, Any]], agent_id: str = "ab
     return path
 
 
+def task_notification(tool_use_id: str, task_id: str, ts: str = "2026-08-01T00:00:05Z"
+                      ) -> dict[str, Any]:
+    """A synthetic ``<task-notification>`` record, as a background Agent dispatch resolves.
+
+    Field/record-type placement is unverified against a real corpus (no subagent dispatch exists
+    in this container's own corpus) — see PLAN docs/superpowers/plans/2026-08-28-firstrun-fixes.md
+    Task 3. The tag text itself is quoted verbatim from FIRSTRUN.md §8.
+    """
+    body = (f"Task finished. <task-notification>\n<task-id>{task_id}</task-id>\n"
+            f"<tool-use-id>{tool_use_id}</tool-use-id>\n</task-notification>")
+    return {"type": "user", "sessionId": SID, "cwd": CWD, "timestamp": ts,
+            "uuid": f"tn-{tool_use_id}", "isMeta": True,
+            "message": {"role": "user", "content": body}}
+
+
 def simple_session() -> list[dict[str, Any]]:
     """A well-formed session: one prompt, one successful tool call, one reply."""
     return [

@@ -20,29 +20,41 @@ from sessionkit.render import (BUDGET_AGGREGATE_KB, BUDGET_EXCERPT_KB, BUDGET_IN
 
 _DURATION = re.compile(r"^(\d+)\s*([hdw])$", re.I)
 _UNITS = {"h": "hours", "d": "days", "w": "weeks"}
+_ABSOLUTE = re.compile(r"^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2})?)?$")
 
 
 def since_cutoff(value: str | None) -> str:
-    """Convert a ``7d``/``12h``/``2w`` window into an ISO-8601 cutoff timestamp.
+    """Convert a ``7d``/``12h``/``2w`` window, or an absolute ``YYYY-MM-DD[THH:MM[:SS]]`` date,
+    into an ISO-8601 cutoff timestamp.
 
     Args:
-        value: Relative duration, or ``None`` for no cutoff.
+        value: A relative duration, an absolute date/datetime, or ``None`` for no cutoff.
 
     Returns:
         An ISO timestamp string, or ``""`` when no cutoff applies.
 
     Raises:
-        SystemExit: If the duration cannot be parsed — a silently-ignored ``--since`` would
-            make a partial report look complete.
+        SystemExit: If neither form parses — a silently-ignored ``--since`` would make a partial
+            report look complete.
     """
     if not value:
         return ""
-    match = _DURATION.match(value.strip())
-    if not match:
-        raise SystemExit(f"unrecognised --since value {value!r}; expected e.g. 7d, 12h, 2w")
-    amount, unit = int(match.group(1)), match.group(2).lower()
-    cutoff = datetime.now(timezone.utc) - timedelta(**{_UNITS[unit]: amount})
-    return cutoff.isoformat().replace("+00:00", "Z")
+    value = value.strip()
+    match = _DURATION.match(value)
+    if match:
+        amount, unit = int(match.group(1)), match.group(2).lower()
+        cutoff = datetime.now(timezone.utc) - timedelta(**{_UNITS[unit]: amount})
+        return cutoff.isoformat().replace("+00:00", "Z")
+    if _ABSOLUTE.match(value):
+        iso = value if "T" in value else f"{value}T00:00:00"
+        try:
+            dt = datetime.fromisoformat(iso).replace(tzinfo=timezone.utc)
+        except ValueError:
+            raise SystemExit(f"unrecognised --since value {value!r}; expected e.g. 7d, 12h, 2w, "
+                             "or an absolute date/time like 2026-08-17 or 2026-08-17T14:30") from None
+        return dt.isoformat().replace("+00:00", "Z")
+    raise SystemExit(f"unrecognised --since value {value!r}; expected e.g. 7d, 12h, 2w, or an "
+                     "absolute date/time like 2026-08-17 or 2026-08-17T14:30")
 
 
 def _scope(args: argparse.Namespace) -> query.Filter:
@@ -53,6 +65,7 @@ def _scope(args: argparse.Namespace) -> query.Filter:
         source=getattr(args, "source", None) or "",
         state=getattr(args, "state", None) or "",
         subagents=getattr(args, "subagents", "include"),
+        label_contains=getattr(args, "label_contains", None) or "",
     )
 
 
@@ -101,13 +114,20 @@ def cmd_index(corpus: Corpus, args: argparse.Namespace) -> str:
     rows = query.index_rows(corpus, _scope(args))
     report = Report(args.json, args.budget_kb or BUDGET_INDEX_KB)
     report.meta(sessions=len(rows), subagents=args.subagents)
-    report.table(
-        ["sid", "project", "ended", "turns", "cost", "state", "model", "label"],
-        [[r["sid"][:8], r["project_key"], (r["ended_at"] or "")[:16], r["turns"],
-          f"{r['cost_usd']:.2f}", r["end_state"], _short_model(r["model"]),
-          r["label"] or ""] for r in rows],
-        key="sessions",
-    )
+    headers = ["sid", "project", "ended", "turns", "cost", "state", "model", "label",
+               "parent_sid", "agent_type"]
+    show_lineage = args.subagents in ("include", "only")
+    table_rows = [[r["sid"][:8], r["project_key"], (r["ended_at"] or "")[:16], r["turns"],
+                   f"{r['cost_usd']:.2f}", r["end_state"], _short_model(r["model"]),
+                   r["label"] or "",
+                   r["parent_sid"][:8] if r["parent_sid"] else "-",
+                   r["agent_type"] or "-"] for r in rows]
+    # JSON callers always get lineage; the text table only spends columns on it when
+    # subagents are in scope, so a plain `sk index` stays compact.
+    if args.json or show_lineage:
+        report.table(headers, table_rows, key="sessions")
+    else:
+        report.table(headers[:-2], [row[:-2] for row in table_rows], key="sessions")
     return report.render()
 
 
@@ -240,6 +260,33 @@ def cmd_forensics(corpus: Corpus, args: argparse.Namespace) -> str:
     return report.render()
 
 
+def cmd_children(corpus: Corpus, args: argparse.Namespace) -> str:
+    """Every Agent dispatch from one session, resolved to its child sid, state and cost.
+
+    Collapses what FIRSTRUN.md §2 needed ten-plus `sk` calls and a label-text guess to find.
+    """
+    entry = query.find_session(corpus, args.sid)
+    if entry is None:
+        raise SystemExit(f"no session matching {args.sid!r} (try `sk index`)")
+    rows = query.children_rows(entry, corpus)
+    unresolved = sum(1 for r in rows if not r["resolved"])
+
+    report = Report(args.json, args.budget_kb or BUDGET_EXCERPT_KB)
+    report.meta(sid=entry.session.sid, dispatches=len(rows), unresolved=unresolved)
+    if unresolved:
+        report.text(f"{unresolved} dispatch(es) have no task-notification match in this "
+                    "transcript — reported as unresolved rather than guessed by order.")
+    report.section("Children")
+    report.table(
+        ["line", "child_sid", "resolved", "agent_type", "state", "cost", "project", "dispatch"],
+        [[r["line"], r["child_sid"][:8] if r["child_sid"] else "-",
+          "yes" if r["resolved"] else "no", r["agent_type"] or "-", r["state"] or "-",
+          f"{r['cost_usd']:.2f}", r["project"] or "-", r["description"]] for r in rows],
+        key="children",
+    )
+    return report.render()
+
+
 def _headline(corpus: Corpus, scope: query.Filter, rows: list[query.Row], total: int) -> str:
     """Summarise the clusters, ranking by breadth as well as raw count.
 
@@ -272,7 +319,7 @@ def cmd_show(corpus: Corpus, args: argparse.Namespace) -> str:
         raise SystemExit(f"no session matching {args.sid!r} (try `sk index`)")
     session = entry.session
 
-    report = Report(args.json, args.budget_kb or BUDGET_EXCERPT_KB)
+    report = Report(args.json, args.budget_kb or BUDGET_EXCERPT_KB, full=args.full)
     report.meta(sid=session.sid, project=entry.project_key, model=session.model,
                 state=session.end_state, turns=session.turns,
                 cost=human_cost(session.cost_usd), path=session.path)
@@ -320,25 +367,26 @@ def _show_messages(entry: corpus_mod.Loaded, args: argparse.Namespace,
     report.section(f"Messages {lo}:{hi}")
     report.table(["line", "role", "chars", "preview"],
                  [[r["line"], r["role"], r["text_len"], r["preview"]]
-                  for r in query.message_rows(entry, lo, hi)],
+                  for r in query.message_rows(entry, lo, hi, full=args.full)],
                  key="messages")
 
 
-def _show_tools(entry: corpus_mod.Loaded, _args: argparse.Namespace, report: Report) -> None:
+def _show_tools(entry: corpus_mod.Loaded, args: argparse.Namespace, report: Report) -> None:
     """Every tool call in the session."""
     report.section("Tool calls")
     report.table(["line", "tool", "ms", "err", "input"],
                  [[r["line"], r["name"], r["dur_ms"], r["err_class"] or "",
-                   r["input_preview"]] for r in query.tool_rows(entry)], key="tools")
+                   r["input_preview"]] for r in query.tool_rows(entry, full=args.full)],
+                 key="tools")
 
 
-def _show_errors(entry: corpus_mod.Loaded, _args: argparse.Namespace, report: Report) -> None:
+def _show_errors(entry: corpus_mod.Loaded, args: argparse.Namespace, report: Report) -> None:
     """Only the failing tool calls, with their fix hints."""
     report.section("Errors")
     report.table(["line", "tool", "class", "fix", "detail"],
                  [[r["line"], r["name"], r["err_class"],
                    classify_error(r["output_preview"])[1],
-                   r["output_preview"] or ""] for r in query.error_rows(entry)],
+                   r["output_preview"] or ""] for r in query.error_rows(entry, full=args.full)],
                  key="errors")
 
 
@@ -397,6 +445,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_index = sub.add_parser("index", parents=[common, scoped],
                              help="one line per session (layer 1)")
     p_index.add_argument("--state", help="filter by end_state, e.g. interrupted-tool")
+    p_index.add_argument("--label-contains",
+                         help="only sessions whose title/label contains this text "
+                              "(case-insensitive)")
     _subagents_arg(p_index, "exclude")
 
     p_show = sub.add_parser("show", parents=[common],
@@ -405,6 +456,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_show.add_argument("--mode", default="summary",
                         choices=["summary", "timeline", "messages", "tools", "errors"])
     p_show.add_argument("--range", help="line range for --mode messages, e.g. 40:80")
+    p_show.add_argument("--full", action="store_true",
+                        help="re-read tool/message text from source for full fidelity, past "
+                             "the in-memory preview cap (JSON never truncates a cell either way)")
 
     p_err = sub.add_parser("errors", parents=[common, scoped],
                            help="cluster tool failures fleet-wide (layer 2)")
@@ -429,11 +483,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_forensics = sub.add_parser("forensics", parents=[common],
                                  help="why one session went wrong (layer 3)")
     p_forensics.add_argument("sid", help="session id or unique prefix")
+
+    p_children = sub.add_parser("children", parents=[common],
+                                help="Agent dispatches from one session, resolved to child sid")
+    p_children.add_argument("sid", help="session id or unique prefix")
     return parser
 
 
 COMMANDS = {"doctor": cmd_doctor, "index": cmd_index, "show": cmd_show, "errors": cmd_errors,
-            "commands": cmd_commands, "hooks": cmd_hooks, "forensics": cmd_forensics}
+            "commands": cmd_commands, "hooks": cmd_hooks, "forensics": cmd_forensics,
+            "children": cmd_children}
 
 
 def main(argv: list[str] | None = None) -> int:

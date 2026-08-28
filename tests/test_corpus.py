@@ -578,6 +578,80 @@ class ShowSkillsTest(unittest.TestCase):
         self.assertIn("Skills", out)
 
 
+class ChildrenTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        tmp = Path(self._tmp.name)
+        self.home = tmp / "claude"
+        self.home.mkdir()
+        (tmp / "empty.env").write_text("", encoding="utf-8")
+        patcher = mock.patch.dict(os.environ, {
+            "CLAUDE_DIR": str(self.home), "SESSIONKIT_ENV": str(tmp / "empty.env")})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _args(self, *argv: str):
+        return cli.build_parser().parse_args(list(argv))
+
+    def test_resolves_by_the_exact_join_not_dispatch_order(self) -> None:
+        # Two dispatches; their notifications arrive in the OPPOSITE order, which would silently
+        # mispair a positional/timestamp resolver (FIRSTRUN.md §8) but must not fool the real one.
+        fx.write(self.home, [
+            fx.user("go"),
+            fx.assistant([
+                fx.tool_use("d1", "Agent", {"description": "Implement Task 1"}),
+                fx.tool_use("d2", "Agent", {"description": "Implement Task 2"}),
+            ]),
+            fx.task_notification("d2", "childtwo01"),
+            fx.task_notification("d1", "childone01"),
+        ], name="aaaa1111.jsonl")
+        fx.write_subagent(self.home, fx.simple_session(), agent_id="childone01",
+                          agent_type="general-purpose")
+        fx.write_subagent(self.home, fx.simple_session(), agent_id="childtwo01",
+                          agent_type="general-purpose")
+        corp = corpus.load()
+        parent = next(e for e in corp.sessions if not e.session.is_subagent)
+        rows = query.children_rows(parent, corp)
+        by_line = {r["description"]: r["child_sid"] for r in rows}
+        self.assertEqual(by_line["Implement Task 1"][:10], "childone01")
+        self.assertEqual(by_line["Implement Task 2"][:10], "childtwo01")
+
+    def test_unresolved_dispatch_is_reported_not_guessed(self) -> None:
+        fx.write(self.home, [
+            fx.user("go"),
+            fx.assistant([fx.tool_use("d1", "Agent", {"description": "Implement Task 1"})]),
+        ], name="aaaa1111.jsonl")
+        corp = corpus.load()
+        parent = next(e for e in corp.sessions if not e.session.is_subagent)
+        rows = query.children_rows(parent, corp)
+        self.assertEqual(len(rows), 1)
+        self.assertFalse(rows[0]["resolved"])
+        self.assertEqual(rows[0]["child_sid"], "")
+
+        out = cli.cmd_children(corp, self._args("children", parent.session.sid))
+        self.assertIn("1 dispatch(es)", out)
+        self.assertIn("unresolved", out)
+
+    def test_duplicate_task_notifications_do_not_double_count(self) -> None:
+        # A single task can notify twice (progress + completion, per FIRSTRUN.md §8's
+        # `a3c7bebc` example). Duplicate (tool_use_id, task_id) edges must collapse to one row.
+        fx.write(self.home, [
+            fx.user("go"),
+            fx.assistant([fx.tool_use("d1", "Agent", {"description": "Implement Task 1"})]),
+            fx.task_notification("d1", "childone01"),
+            fx.task_notification("d1", "childone01"),
+        ], name="aaaa1111.jsonl")
+        fx.write_subagent(self.home, fx.simple_session(), agent_id="childone01",
+                          agent_type="general-purpose")
+        corp = corpus.load()
+        parent = next(e for e in corp.sessions if not e.session.is_subagent)
+        rows = query.children_rows(parent, corp)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["child_sid"][:10], "childone01")
+        self.assertTrue(rows[0]["resolved"])
+
+
 class SinceTest(unittest.TestCase):
     """--since parsing must fail loudly rather than silently ignoring a bad window."""
 
@@ -591,6 +665,99 @@ class SinceTest(unittest.TestCase):
     def test_bad_window_raises(self) -> None:
         with self.assertRaises(SystemExit):
             cli.since_cutoff("last tuesday")
+
+    def test_absolute_date(self) -> None:
+        self.assertEqual(cli.since_cutoff("2026-08-17"), "2026-08-17T00:00:00Z")
+
+    def test_absolute_datetime(self) -> None:
+        self.assertEqual(cli.since_cutoff("2026-08-17T14:30"), "2026-08-17T14:30:00Z")
+
+    def test_calendar_invalid_date_raises(self) -> None:
+        with self.assertRaises(SystemExit):
+            cli.since_cutoff("2026-13-45")
+
+
+class IndexColumnsTest(unittest.TestCase):
+    """`sk index` surfaces lineage (parent_sid/agent_type) for subagent rows."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp = Path(self._tmp.name)
+        self.home = self.tmp / "claude"
+        self.home.mkdir()
+        env_file = self.tmp / "empty.env"
+        env_file.write_text("", encoding="utf-8")
+        patcher = mock.patch.dict(os.environ, {
+            "CLAUDE_DIR": str(self.home),
+            "SESSIONKIT_ENV": str(env_file),
+        })
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_index_reports_parent_sid_and_agent_type_for_subagents(self) -> None:
+        fx.write(self.home, fx.simple_session(), name="aaaa1111.jsonl")
+        fx.write_subagent(self.home, [
+            fx.user("explore"),
+            fx.assistant([fx.tool_use("s1", "Grep", {"pattern": "TODO"})]),
+            fx.tool_result("s1", "not found"),
+        ], agent_id="eeee5555", agent_type="Explore")
+        rows = query.index_rows(corpus.load(), query.Filter(subagents="only"))
+        self.assertEqual(rows[0]["parent_sid"], fx.SID)
+        self.assertEqual(rows[0]["agent_type"], "Explore")
+
+        args = cli.build_parser().parse_args(["index", "--subagents", "only"])
+        out = cli.cmd_index(corpus.load(), args)
+        self.assertIn("parent_sid", out)
+        self.assertIn("Explore", out)
+
+    def test_label_contains_filters_case_insensitively(self) -> None:
+        fx.write(self.home, fx.simple_session(), name="aaaa1111.jsonl")
+        # simple_session()'s first prompt is "add a feature"
+        matches = query.index_rows(corpus.load(), query.Filter(label_contains="FEATURE"))
+        self.assertEqual(len(matches), 1)
+        no_matches = query.index_rows(corpus.load(), query.Filter(label_contains="nonexistent"))
+        self.assertEqual(no_matches, [])
+
+    def test_index_json_always_carries_lineage_keys_even_with_subagents_excluded(self) -> None:
+        """--subagents exclude is the CLI default; JSON callers must not lose the fields."""
+        fx.write(self.home, fx.simple_session(), name="aaaa1111.jsonl")
+        args = cli.build_parser().parse_args(["index", "--json"])
+        self.assertEqual(args.subagents, "exclude")
+        out = json.loads(cli.cmd_index(corpus.load(), args))
+        self.assertIn("parent_sid", out["sessions"][0])
+        self.assertIn("agent_type", out["sessions"][0])
+
+
+class ShowFullTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        tmp = Path(self._tmp.name)
+        self.home = tmp / "claude"
+        self.home.mkdir()
+        (tmp / "empty.env").write_text("", encoding="utf-8")
+        patcher = mock.patch.dict(os.environ, {
+            "CLAUDE_DIR": str(self.home), "SESSIONKIT_ENV": str(tmp / "empty.env")})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _args(self, *argv: str):
+        return cli.build_parser().parse_args(list(argv))
+
+    def test_full_recovers_a_tool_input_past_the_preview_cap(self) -> None:
+        long_arg = "x" * 3000  # past INPUT_PREVIEW=2000
+        fx.write(self.home, [
+            fx.user("go"),
+            fx.assistant([fx.tool_use("t1", "Bash", {"command": long_arg})]),
+            fx.tool_result("t1", "ok"),
+        ], name="aaaa1111.jsonl")
+        loaded = corpus.load()
+        sid = loaded.sessions[0].session.sid
+        capped = cli.cmd_show(loaded, self._args("show", sid, "--mode", "tools"))
+        full = cli.cmd_show(loaded, self._args("show", sid, "--mode", "tools", "--full"))
+        self.assertNotIn(long_arg, capped)
+        self.assertIn(long_arg, full)
 
 
 if __name__ == "__main__":  # pragma: no cover
