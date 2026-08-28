@@ -36,13 +36,15 @@ def is_failure(tool: ToolCall) -> bool:
 
 @dataclass
 class Filter:
-    """The shared scope flags: ``--since``/``--project``/``--source``/``--state``."""
+    """The shared scope flags: ``--since``/``--project``/``--source``/``--state``/
+    ``--label-contains``."""
 
     cutoff: str = ""
     project: str = ""
     source: str = ""
     state: str = ""
     subagents: str = "include"
+    label_contains: str = ""
 
     def matches(self, entry: Loaded) -> bool:
         """Whether a session is in scope."""
@@ -59,6 +61,10 @@ class Filter:
             return False
         if self.subagents == "only" and not session.is_subagent:
             return False
+        if self.label_contains:
+            label = (session.title or session.first_prompt or "").lower()
+            if self.label_contains.lower() not in label:
+                return False
         return True
 
     def apply(self, corpus: Corpus) -> list[Loaded]:

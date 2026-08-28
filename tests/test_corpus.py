@@ -711,6 +711,14 @@ class IndexColumnsTest(unittest.TestCase):
         self.assertIn("parent_sid", out)
         self.assertIn("Explore", out)
 
+    def test_label_contains_filters_case_insensitively(self) -> None:
+        fx.write(self.home, fx.simple_session(), name="aaaa1111.jsonl")
+        # simple_session()'s first prompt is "add a feature"
+        matches = query.index_rows(corpus.load(), query.Filter(label_contains="FEATURE"))
+        self.assertEqual(len(matches), 1)
+        no_matches = query.index_rows(corpus.load(), query.Filter(label_contains="nonexistent"))
+        self.assertEqual(no_matches, [])
+
     def test_index_json_always_carries_lineage_keys_even_with_subagents_excluded(self) -> None:
         """--subagents exclude is the CLI default; JSON callers must not lose the fields."""
         fx.write(self.home, fx.simple_session(), name="aaaa1111.jsonl")

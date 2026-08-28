@@ -65,6 +65,7 @@ def _scope(args: argparse.Namespace) -> query.Filter:
         source=getattr(args, "source", None) or "",
         state=getattr(args, "state", None) or "",
         subagents=getattr(args, "subagents", "include"),
+        label_contains=getattr(args, "label_contains", None) or "",
     )
 
 
@@ -443,6 +444,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_index = sub.add_parser("index", parents=[common, scoped],
                              help="one line per session (layer 1)")
     p_index.add_argument("--state", help="filter by end_state, e.g. interrupted-tool")
+    p_index.add_argument("--label-contains",
+                         help="only sessions whose title/label contains this text "
+                              "(case-insensitive)")
     _subagents_arg(p_index, "exclude")
 
     p_show = sub.add_parser("show", parents=[common],
