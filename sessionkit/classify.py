@@ -202,6 +202,71 @@ def derive_end_state(session: ParsedSession) -> tuple[str, str]:
     return ("unknown", "no messages parsed")
 
 
+#: Precedence order — earlier entries win. Same shape as the error taxonomy's ordered rules:
+#: a single signal per session, chosen deterministically, so a downstream skill can key on it.
+TAIL_SIGNALS: tuple[str, ...] = (
+    "mid_tool", "error_tail", "apology", "completion_marker",
+    "next_step_stated", "silent", "neutral",
+)
+
+_APOLOGY_RE = re.compile(r"\b(sorry|apologi[sz]e|unable to|can'?t|cannot)\b", re.I)
+_COMPLETION_RE = re.compile(
+    r"\b(done|complete[ds]?|finished|shipped|ready|works|all set|"
+    r"passing|passes)\b", re.I)
+_NEXT_STEP_RE = re.compile(
+    r"(?:^|[\.\n])\s*(?:I(?:'|’)?ll|I will|next[,:]|next step|going to|"
+    r"about to|let me)\b", re.I)
+
+
+def derive_tail_signal(session: ParsedSession, tail_texts: dict[int, str]) -> str:
+    """Classify the tail of a session for the ``unfinished-work`` skill.
+
+    Args:
+        session: Post-parse session, with ``err_class`` already annotated on tools.
+        tail_texts: Map from ``message.line`` to that message's **full** text — the
+            classifier needs uncapped strings because completion markers ("this is now
+            done") frequently land past the 200-char preview cap. The caller decides how
+            many trailing messages to include; only the entries whose line matches a
+            message in ``session.messages`` are consulted.
+
+    Returns:
+        One value from ``TAIL_SIGNALS``. Never raises. Empty sessions return ``"neutral"``.
+    """
+    # mid_tool: any tool_use without a paired tool_result. `annotate_errors` already tags
+    # these with err_class == "no-result" (parse.py leaves the flag set to False because
+    # the tool did not produce a failing result — it produced no result at all).
+    if any(t.err_class == "no-result" for t in session.tools):
+        return "mid_tool"
+
+    # error_tail: the final tool call actually failed with a classified taxonomy error.
+    if session.tools:
+        last = session.tools[-1]
+        if last.is_error and last.err_class and last.err_class != "no-result":
+            return "error_tail"
+
+    if not session.messages:
+        return "neutral"
+
+    last_msg = session.messages[-1]
+
+    # silent: the final turn is a user prompt with no assistant reply — the same signal
+    # `derive_end_state` uses for `interrupted-user`, exposed here for the tail classifier.
+    if last_msg.role == "user":
+        return "silent"
+
+    if last_msg.role != "assistant":
+        return "neutral"
+
+    text = tail_texts.get(last_msg.line, last_msg.preview or "")
+    if _APOLOGY_RE.search(text):
+        return "apology"
+    if _COMPLETION_RE.search(text):
+        return "completion_marker"
+    if _NEXT_STEP_RE.search(text):
+        return "next_step_stated"
+    return "neutral"
+
+
 def _trailing_errors(tools: list[ToolCall]) -> int:
     """Count failing tool calls at the tail of the session."""
     count = 0

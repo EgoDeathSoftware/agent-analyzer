@@ -146,6 +146,7 @@ class ParsedSession:
     attach: list[Attach] = field(default_factory=list)
     end_state: str = "unknown"
     end_reason: str = ""
+    tail_signal: str = ""
 
 
 def basename_of(path: str) -> str:
