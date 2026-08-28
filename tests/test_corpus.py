@@ -672,6 +672,10 @@ class SinceTest(unittest.TestCase):
     def test_absolute_datetime(self) -> None:
         self.assertEqual(cli.since_cutoff("2026-08-17T14:30"), "2026-08-17T14:30:00Z")
 
+    def test_calendar_invalid_date_raises(self) -> None:
+        with self.assertRaises(SystemExit):
+            cli.since_cutoff("2026-13-45")
+
 
 class IndexColumnsTest(unittest.TestCase):
     """`sk index` surfaces lineage (parent_sid/agent_type) for subagent rows."""

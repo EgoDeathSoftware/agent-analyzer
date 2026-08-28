@@ -47,7 +47,11 @@ def since_cutoff(value: str | None) -> str:
         return cutoff.isoformat().replace("+00:00", "Z")
     if _ABSOLUTE.match(value):
         iso = value if "T" in value else f"{value}T00:00:00"
-        dt = datetime.fromisoformat(iso).replace(tzinfo=timezone.utc)
+        try:
+            dt = datetime.fromisoformat(iso).replace(tzinfo=timezone.utc)
+        except ValueError:
+            raise SystemExit(f"unrecognised --since value {value!r}; expected e.g. 7d, 12h, 2w, "
+                             "or an absolute date/time like 2026-08-17 or 2026-08-17T14:30") from None
         return dt.isoformat().replace("+00:00", "Z")
     raise SystemExit(f"unrecognised --since value {value!r}; expected e.g. 7d, 12h, 2w, or an "
                      "absolute date/time like 2026-08-17 or 2026-08-17T14:30")
