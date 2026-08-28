@@ -373,6 +373,62 @@ def tail_rows(entry: Loaded, n: int = 6, full: bool = False) -> list[Row]:
     return combined
 
 
+# --- files ------------------------------------------------------------------------------
+
+def file_rows(entry: Loaded) -> list[Row]:
+    """One row per unique path in a session, with op counts split by kind.
+
+    ``FileOp`` carries no line number of its own — it's joined here against the owning
+    ``ToolCall`` by ``tool_use_id`` to recover ``first_line``/``last_line``.
+    """
+    line_of = {t.tool_use_id: t.line for t in entry.session.tools}
+    buckets: dict[str, dict[str, Any]] = {}
+    for op in entry.session.files:
+        line = line_of.get(op.tool_use_id, 0)
+        row = buckets.setdefault(op.path, {
+            "path": op.path, "reads": 0, "writes": 0, "edits": 0,
+            "first_line": line, "last_line": line,
+            "first_ts": op.ts, "last_ts": op.ts,
+        })
+        if op.op == "read":
+            row["reads"] += 1
+        elif op.op == "write":
+            row["writes"] += 1
+        elif op.op == "edit":
+            row["edits"] += 1
+        row["last_line"] = max(row["last_line"], line)
+        row["last_ts"] = op.ts if op.ts > row["last_ts"] else row["last_ts"]
+    return sorted(
+        buckets.values(),
+        key=lambda r: (-(r["reads"] + r["writes"] + r["edits"]), r["first_line"]),
+    )
+
+
+def file_project_rows(corpus: Corpus, scope: Filter) -> list[Row]:
+    """Per-path rollup across every session in scope: op counts, session count, an exemplar sid."""
+    buckets: dict[str, dict[str, Any]] = {}
+    for entry in scope.apply(corpus):
+        for op in entry.session.files:
+            row = buckets.setdefault(op.path, {
+                "path": op.path, "reads": 0, "writes": 0, "edits": 0,
+                "sessions": set(), "exemplar_sid": entry.session.sid,
+            })
+            if op.op == "read":
+                row["reads"] += 1
+            elif op.op == "write":
+                row["writes"] += 1
+            elif op.op == "edit":
+                row["edits"] += 1
+            row["sessions"].add(entry.session.sid)
+    out = []
+    for row in buckets.values():
+        row["sessions"] = len(row["sessions"])
+        out.append(row)
+    return sorted(out, key=lambda r: (-r["sessions"],
+                                      -(r["reads"] + r["writes"] + r["edits"]),
+                                      r["path"]))
+
+
 # --- commands -----------------------------------------------------------------------------
 
 def _owner_sid(entry: Loaded) -> str:

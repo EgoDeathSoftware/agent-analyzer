@@ -286,6 +286,38 @@ def _cmd_tail_all(corpus: Corpus, args: argparse.Namespace) -> str:
     return report.render()
 
 
+def cmd_files(corpus: Corpus, args: argparse.Namespace) -> str:
+    """Files touched by one session, or rolled up across a project/corpus scope."""
+    if args.sid:
+        entry = query.find_session(corpus, args.sid)
+        if entry is None:
+            raise SystemExit(f"no session matching {args.sid!r} (try `sk index`)")
+        rows = query.file_rows(entry)
+        report = Report(args.json, args.budget_kb or BUDGET_AGGREGATE_KB)
+        report.meta(sid=entry.session.sid, project=entry.project_key,
+                    cwd=entry.session.cwd, paths=len(rows))
+        report.section("Files")
+        report.table(
+            ["path", "reads", "writes", "edits", "first_line", "last_line"],
+            [[r["path"], r["reads"], r["writes"], r["edits"],
+              r["first_line"], r["last_line"]] for r in rows],
+            key="files",
+        )
+        return report.render()
+
+    rows = query.file_project_rows(corpus, _scope(args))
+    report = Report(args.json, args.budget_kb or BUDGET_AGGREGATE_KB)
+    report.meta(paths=len(rows), project=args.project or "any")
+    report.section("Files across scope")
+    report.table(
+        ["path", "sessions", "reads", "writes", "edits", "exemplar_sid"],
+        [[r["path"], r["sessions"], r["reads"], r["writes"], r["edits"],
+          r["exemplar_sid"][:8]] for r in rows],
+        key="files",
+    )
+    return report.render()
+
+
 def _headline(corpus: Corpus, scope: query.Filter, rows: list[query.Row], total: int) -> str:
     """Summarise the clusters, ranking by breadth as well as raw count.
 
@@ -490,12 +522,18 @@ def build_parser() -> argparse.ArgumentParser:
                         help="re-read message text from source for full fidelity "
                              "(JSON never truncates a cell either way)")
     _subagents_arg(p_tail, "include")
+
+    p_files = sub.add_parser("files", parents=[common, scoped],
+                             help="files a session (or scope) touched")
+    p_files.add_argument("sid", nargs="?", default=None,
+                         help="session id or unique prefix; omit for a project rollup")
+    _subagents_arg(p_files, "include")
     return parser
 
 
 COMMANDS = {"doctor": cmd_doctor, "index": cmd_index, "show": cmd_show, "errors": cmd_errors,
             "commands": cmd_commands, "hooks": cmd_hooks, "forensics": cmd_forensics,
-            "tail": cmd_tail}
+            "tail": cmd_tail, "files": cmd_files}
 
 
 def main(argv: list[str] | None = None) -> int:
