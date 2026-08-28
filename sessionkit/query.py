@@ -126,6 +126,8 @@ def index_rows(corpus: Corpus, scope: Filter) -> list[Row]:
             "end_state": s.end_state,
             "model": s.model,
             "label": s.title or s.first_prompt,
+            "parent_sid": s.parent_sid,
+            "agent_type": s.agent_type,
         })
     return out
 

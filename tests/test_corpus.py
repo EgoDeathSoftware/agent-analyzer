@@ -667,5 +667,40 @@ class SinceTest(unittest.TestCase):
             cli.since_cutoff("last tuesday")
 
 
+class IndexColumnsTest(unittest.TestCase):
+    """`sk index` surfaces lineage (parent_sid/agent_type) for subagent rows."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp = Path(self._tmp.name)
+        self.home = self.tmp / "claude"
+        self.home.mkdir()
+        env_file = self.tmp / "empty.env"
+        env_file.write_text("", encoding="utf-8")
+        patcher = mock.patch.dict(os.environ, {
+            "CLAUDE_DIR": str(self.home),
+            "SESSIONKIT_ENV": str(env_file),
+        })
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_index_reports_parent_sid_and_agent_type_for_subagents(self) -> None:
+        fx.write(self.home, fx.simple_session(), name="aaaa1111.jsonl")
+        fx.write_subagent(self.home, [
+            fx.user("explore"),
+            fx.assistant([fx.tool_use("s1", "Grep", {"pattern": "TODO"})]),
+            fx.tool_result("s1", "not found"),
+        ], agent_id="eeee5555", agent_type="Explore")
+        rows = query.index_rows(corpus.load(), query.Filter(subagents="only"))
+        self.assertEqual(rows[0]["parent_sid"], fx.SID)
+        self.assertEqual(rows[0]["agent_type"], "Explore")
+
+        args = cli.build_parser().parse_args(["index", "--subagents", "only"])
+        out = cli.cmd_index(corpus.load(), args)
+        self.assertIn("parent_sid", out)
+        self.assertIn("Explore", out)
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

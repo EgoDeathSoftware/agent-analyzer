@@ -101,13 +101,18 @@ def cmd_index(corpus: Corpus, args: argparse.Namespace) -> str:
     rows = query.index_rows(corpus, _scope(args))
     report = Report(args.json, args.budget_kb or BUDGET_INDEX_KB)
     report.meta(sessions=len(rows), subagents=args.subagents)
-    report.table(
-        ["sid", "project", "ended", "turns", "cost", "state", "model", "label"],
-        [[r["sid"][:8], r["project_key"], (r["ended_at"] or "")[:16], r["turns"],
-          f"{r['cost_usd']:.2f}", r["end_state"], _short_model(r["model"]),
-          r["label"] or ""] for r in rows],
-        key="sessions",
-    )
+    headers = ["sid", "project", "ended", "turns", "cost", "state", "model", "label"]
+    show_lineage = args.subagents in ("include", "only")
+    if show_lineage:
+        headers += ["parent_sid", "agent_type"]
+    table_rows = []
+    for r in rows:
+        row = [r["sid"][:8], r["project_key"], (r["ended_at"] or "")[:16], r["turns"],
+               f"{r['cost_usd']:.2f}", r["end_state"], _short_model(r["model"]), r["label"] or ""]
+        if show_lineage:
+            row += [r["parent_sid"][:8] if r["parent_sid"] else "-", r["agent_type"] or "-"]
+        table_rows.append(row)
+    report.table(headers, table_rows, key="sessions")
     return report.render()
 
 
