@@ -701,6 +701,15 @@ class IndexColumnsTest(unittest.TestCase):
         self.assertIn("parent_sid", out)
         self.assertIn("Explore", out)
 
+    def test_index_json_always_carries_lineage_keys_even_with_subagents_excluded(self) -> None:
+        """--subagents exclude is the CLI default; JSON callers must not lose the fields."""
+        fx.write(self.home, fx.simple_session(), name="aaaa1111.jsonl")
+        args = cli.build_parser().parse_args(["index", "--json"])
+        self.assertEqual(args.subagents, "exclude")
+        out = json.loads(cli.cmd_index(corpus.load(), args))
+        self.assertIn("parent_sid", out["sessions"][0])
+        self.assertIn("agent_type", out["sessions"][0])
+
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

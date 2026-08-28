@@ -101,18 +101,20 @@ def cmd_index(corpus: Corpus, args: argparse.Namespace) -> str:
     rows = query.index_rows(corpus, _scope(args))
     report = Report(args.json, args.budget_kb or BUDGET_INDEX_KB)
     report.meta(sessions=len(rows), subagents=args.subagents)
-    headers = ["sid", "project", "ended", "turns", "cost", "state", "model", "label"]
+    headers = ["sid", "project", "ended", "turns", "cost", "state", "model", "label",
+               "parent_sid", "agent_type"]
     show_lineage = args.subagents in ("include", "only")
-    if show_lineage:
-        headers += ["parent_sid", "agent_type"]
-    table_rows = []
-    for r in rows:
-        row = [r["sid"][:8], r["project_key"], (r["ended_at"] or "")[:16], r["turns"],
-               f"{r['cost_usd']:.2f}", r["end_state"], _short_model(r["model"]), r["label"] or ""]
-        if show_lineage:
-            row += [r["parent_sid"][:8] if r["parent_sid"] else "-", r["agent_type"] or "-"]
-        table_rows.append(row)
-    report.table(headers, table_rows, key="sessions")
+    table_rows = [[r["sid"][:8], r["project_key"], (r["ended_at"] or "")[:16], r["turns"],
+                   f"{r['cost_usd']:.2f}", r["end_state"], _short_model(r["model"]),
+                   r["label"] or "",
+                   r["parent_sid"][:8] if r["parent_sid"] else "-",
+                   r["agent_type"] or "-"] for r in rows]
+    # JSON callers always get lineage; the text table only spends columns on it when
+    # subagents are in scope, so a plain `sk index` stays compact.
+    if args.json or show_lineage:
+        report.table(headers, table_rows, key="sessions")
+    else:
+        report.table(headers[:-2], [row[:-2] for row in table_rows], key="sessions")
     return report.render()
 
 
