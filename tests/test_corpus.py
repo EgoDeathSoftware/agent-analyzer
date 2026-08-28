@@ -578,6 +578,80 @@ class ShowSkillsTest(unittest.TestCase):
         self.assertIn("Skills", out)
 
 
+class ChildrenTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        tmp = Path(self._tmp.name)
+        self.home = tmp / "claude"
+        self.home.mkdir()
+        (tmp / "empty.env").write_text("", encoding="utf-8")
+        patcher = mock.patch.dict(os.environ, {
+            "CLAUDE_DIR": str(self.home), "SESSIONKIT_ENV": str(tmp / "empty.env")})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _args(self, *argv: str):
+        return cli.build_parser().parse_args(list(argv))
+
+    def test_resolves_by_the_exact_join_not_dispatch_order(self) -> None:
+        # Two dispatches; their notifications arrive in the OPPOSITE order, which would silently
+        # mispair a positional/timestamp resolver (FIRSTRUN.md §8) but must not fool the real one.
+        fx.write(self.home, [
+            fx.user("go"),
+            fx.assistant([
+                fx.tool_use("d1", "Agent", {"description": "Implement Task 1"}),
+                fx.tool_use("d2", "Agent", {"description": "Implement Task 2"}),
+            ]),
+            fx.task_notification("d2", "childtwo01"),
+            fx.task_notification("d1", "childone01"),
+        ], name="aaaa1111.jsonl")
+        fx.write_subagent(self.home, fx.simple_session(), agent_id="childone01",
+                          agent_type="general-purpose")
+        fx.write_subagent(self.home, fx.simple_session(), agent_id="childtwo01",
+                          agent_type="general-purpose")
+        corp = corpus.load()
+        parent = next(e for e in corp.sessions if not e.session.is_subagent)
+        rows = query.children_rows(parent, corp)
+        by_line = {r["description"]: r["child_sid"] for r in rows}
+        self.assertEqual(by_line["Implement Task 1"][:10], "childone01")
+        self.assertEqual(by_line["Implement Task 2"][:10], "childtwo01")
+
+    def test_unresolved_dispatch_is_reported_not_guessed(self) -> None:
+        fx.write(self.home, [
+            fx.user("go"),
+            fx.assistant([fx.tool_use("d1", "Agent", {"description": "Implement Task 1"})]),
+        ], name="aaaa1111.jsonl")
+        corp = corpus.load()
+        parent = next(e for e in corp.sessions if not e.session.is_subagent)
+        rows = query.children_rows(parent, corp)
+        self.assertEqual(len(rows), 1)
+        self.assertFalse(rows[0]["resolved"])
+        self.assertEqual(rows[0]["child_sid"], "")
+
+        out = cli.cmd_children(corp, self._args("children", parent.session.sid))
+        self.assertIn("1 dispatch(es)", out)
+        self.assertIn("unresolved", out)
+
+    def test_duplicate_task_notifications_do_not_double_count(self) -> None:
+        # A single task can notify twice (progress + completion, per FIRSTRUN.md §8's
+        # `a3c7bebc` example). Duplicate (tool_use_id, task_id) edges must collapse to one row.
+        fx.write(self.home, [
+            fx.user("go"),
+            fx.assistant([fx.tool_use("d1", "Agent", {"description": "Implement Task 1"})]),
+            fx.task_notification("d1", "childone01"),
+            fx.task_notification("d1", "childone01"),
+        ], name="aaaa1111.jsonl")
+        fx.write_subagent(self.home, fx.simple_session(), agent_id="childone01",
+                          agent_type="general-purpose")
+        corp = corpus.load()
+        parent = next(e for e in corp.sessions if not e.session.is_subagent)
+        rows = query.children_rows(parent, corp)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["child_sid"][:10], "childone01")
+        self.assertTrue(rows[0]["resolved"])
+
+
 class SinceTest(unittest.TestCase):
     """--since parsing must fail loudly rather than silently ignoring a bad window."""
 

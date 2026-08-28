@@ -240,6 +240,33 @@ def cmd_forensics(corpus: Corpus, args: argparse.Namespace) -> str:
     return report.render()
 
 
+def cmd_children(corpus: Corpus, args: argparse.Namespace) -> str:
+    """Every Agent dispatch from one session, resolved to its child sid, state and cost.
+
+    Collapses what FIRSTRUN.md §2 needed ten-plus `sk` calls and a label-text guess to find.
+    """
+    entry = query.find_session(corpus, args.sid)
+    if entry is None:
+        raise SystemExit(f"no session matching {args.sid!r} (try `sk index`)")
+    rows = query.children_rows(entry, corpus)
+    unresolved = sum(1 for r in rows if not r["resolved"])
+
+    report = Report(args.json, args.budget_kb or BUDGET_EXCERPT_KB)
+    report.meta(sid=entry.session.sid, dispatches=len(rows), unresolved=unresolved)
+    if unresolved:
+        report.text(f"{unresolved} dispatch(es) have no task-notification match in this "
+                    "transcript — reported as unresolved rather than guessed by order.")
+    report.section("Children")
+    report.table(
+        ["line", "child_sid", "resolved", "agent_type", "state", "cost", "project", "dispatch"],
+        [[r["line"], r["child_sid"][:8] if r["child_sid"] else "-",
+          "yes" if r["resolved"] else "no", r["agent_type"] or "-", r["state"] or "-",
+          f"{r['cost_usd']:.2f}", r["project"] or "-", r["description"]] for r in rows],
+        key="children",
+    )
+    return report.render()
+
+
 def _headline(corpus: Corpus, scope: query.Filter, rows: list[query.Row], total: int) -> str:
     """Summarise the clusters, ranking by breadth as well as raw count.
 
@@ -429,11 +456,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_forensics = sub.add_parser("forensics", parents=[common],
                                  help="why one session went wrong (layer 3)")
     p_forensics.add_argument("sid", help="session id or unique prefix")
+
+    p_children = sub.add_parser("children", parents=[common],
+                                help="Agent dispatches from one session, resolved to child sid")
+    p_children.add_argument("sid", help="session id or unique prefix")
     return parser
 
 
 COMMANDS = {"doctor": cmd_doctor, "index": cmd_index, "show": cmd_show, "errors": cmd_errors,
-            "commands": cmd_commands, "hooks": cmd_hooks, "forensics": cmd_forensics}
+            "commands": cmd_commands, "hooks": cmd_hooks, "forensics": cmd_forensics,
+            "children": cmd_children}
 
 
 def main(argv: list[str] | None = None) -> int:

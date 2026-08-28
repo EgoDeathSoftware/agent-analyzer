@@ -514,3 +514,45 @@ def forensics_health(entry: Loaded) -> Row:
     tools = entry.session.tools
     failed = sum(1 for t in tools if is_failure(t))
     return {"tool_calls": len(tools), "failed": failed, "succeeded": len(tools) - failed}
+
+
+# --- children ---------------------------------------------------------------------------
+
+def children_rows(entry: Loaded, corpus: Corpus) -> list[Row]:
+    """Every ``Agent`` dispatch from one session, resolved to its child via the exact
+    task-notification join (``parse.py``'s ``dispatch_edges``) — never by timestamp or dispatch
+    order, which FIRSTRUN.md §8 found silently mispairs retries and non-adjacent completions.
+
+    A dispatch with no matching notification is reported as unresolved rather than guessed.
+    """
+    edges = dict(entry.session.dispatch_edges)
+    by_sid = {c.session.sid: c for c in corpus.sessions if c.session.is_subagent}
+    out: list[Row] = []
+    for tool in entry.session.tools:
+        if tool.name != "Agent":
+            continue
+        task_id = edges.get(tool.tool_use_id, "")
+        child = by_sid.get(task_id) if task_id else None
+        out.append({
+            "line": tool.line,
+            "description": _agent_description(tool),
+            "child_sid": child.session.sid if child else "",
+            "resolved": child is not None,
+            "agent_type": child.session.agent_type if child else "",
+            "state": child.session.end_state if child else "",
+            "cost_usd": child.session.cost_usd if child else 0.0,
+            "project": child.project_key if child else "",
+        })
+    out.sort(key=lambda r: r["line"])
+    return out
+
+
+def _agent_description(tool: ToolCall) -> str:
+    """Best-effort dispatch description from an ``Agent`` call's input."""
+    try:
+        parsed = json.loads(tool.input_preview)
+    except (ValueError, TypeError):
+        return tool.input_preview
+    if isinstance(parsed, dict):
+        return str(parsed.get("description") or parsed.get("prompt") or tool.input_preview)
+    return tool.input_preview
