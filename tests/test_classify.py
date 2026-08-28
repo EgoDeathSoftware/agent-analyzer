@@ -155,18 +155,20 @@ class DetectorTest(unittest.TestCase):
 
     def test_file_thrash(self) -> None:
         session = _session()
-        session.files.extend(FileOp("/a.py", "edit", "", "t") for _ in range(5))
-        self.assertIn("file-thrash", _kinds(session))
+        session.files.extend(FileOp("/a.py", "edit", "", "t", line=i) for i in range(1, 6))
+        anomaly = next(a for a in detect(session) if a.kind == "file-thrash")
+        self.assertEqual(anomaly.lines, [1, 2, 3, 4, 5])
 
     def test_file_thrash_negative(self) -> None:
         session = _session()
-        session.files.extend(FileOp(f"/{i}.py", "edit", "", "t") for i in range(9))
+        session.files.extend(FileOp(f"/{i}.py", "edit", "", "t", line=i) for i in range(9))
         self.assertNotIn("file-thrash", _kinds(session))
 
     def test_read_loop(self) -> None:
         session = _session()
-        session.files.extend(FileOp("/a.py", "read", "", "t") for _ in range(4))
-        self.assertIn("read-loop", _kinds(session))
+        session.files.extend(FileOp("/a.py", "read", "", "t", line=i) for i in range(1, 5))
+        anomaly = next(a for a in detect(session) if a.kind == "read-loop")
+        self.assertEqual(anomaly.lines, [1, 2, 3, 4])
 
     def test_error_cascade_run(self) -> None:
         session = _session()
@@ -230,7 +232,7 @@ class DetectorTest(unittest.TestCase):
     def test_clean_session_has_no_anomalies(self) -> None:
         session = _session()
         session.tools.append(_call(1, digest_="a"))
-        session.files.append(FileOp("/a.py", "read", "", "t"))
+        session.files.append(FileOp("/a.py", "read", "", "t", line=1))
         self.assertEqual(detect(session), [])
 
 

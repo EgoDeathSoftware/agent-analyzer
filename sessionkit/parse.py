@@ -92,6 +92,7 @@ class FileOp:
     op: str
     ts: str
     tool_use_id: str
+    line: int = 0
 
 
 @dataclass
@@ -308,7 +309,7 @@ class _Parser:
         for key in PATH_KEYS:
             value = raw_input.get(key)
             if isinstance(value, str) and value:
-                self.out.files.append(FileOp(value, op, ts, call.tool_use_id))
+                self.out.files.append(FileOp(value, op, ts, call.tool_use_id, call.line))
                 return
 
     def _user(self, line_no: int, rec: dict[str, Any]) -> None:

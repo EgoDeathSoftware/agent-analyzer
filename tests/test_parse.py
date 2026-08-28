@@ -70,6 +70,13 @@ class ParseTest(unittest.TestCase):
         self.assertEqual([(f.path, f.op) for f in session.files],
                          [("/a.py", "read"), ("/b.py", "edit")])
 
+    def test_file_operations_carry_their_line_number(self) -> None:
+        session = self.parse([
+            fx.user("go"),
+            fx.assistant([fx.tool_use("t1", "Read", {"file_path": "/a.py"})]),
+        ])
+        self.assertEqual(session.files[0].line, 2)  # the assistant record is JSONL line 2
+
     def test_accumulates_usage_and_cost(self) -> None:
         session = self.parse([
             fx.user("go"),

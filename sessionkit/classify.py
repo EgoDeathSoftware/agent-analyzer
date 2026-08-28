@@ -228,12 +228,12 @@ def _repeat_tool(session: ParsedSession) -> list[Anomaly]:
 
 def _path_churn(session: ParsedSession, op: str, key: str, kind: str) -> list[Anomaly]:
     """Shared implementation for edit-thrash and read-loop detection."""
-    counts: dict[str, int] = {}
+    lines: dict[str, list[int]] = {}
     for f in session.files:
         if f.op == op:
-            counts[f.path] = counts.get(f.path, 0) + 1
+            lines.setdefault(f.path, []).append(f.line)
     limit = THRESHOLDS[key]
-    return [Anomaly(kind, path, n, []) for path, n in counts.items() if n >= limit]
+    return [Anomaly(kind, path, len(ls), ls) for path, ls in lines.items() if len(ls) >= limit]
 
 
 def _error_cascade(session: ParsedSession) -> list[Anomaly]:
