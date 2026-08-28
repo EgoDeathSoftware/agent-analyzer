@@ -121,6 +121,18 @@ class ParseTest(unittest.TestCase):
         self.assertTrue(session.is_subagent)
         self.assertEqual(session.agent_type, "Explore")
 
+    def test_task_notification_records_a_dispatch_edge(self) -> None:
+        session = self.parse([
+            fx.user("go"),
+            fx.assistant([fx.tool_use("toolu_1", "Agent", {"description": "do work"})]),
+            fx.task_notification("toolu_1", "childsid123"),
+        ])
+        self.assertEqual(session.dispatch_edges, [("toolu_1", "childsid123")])
+
+    def test_no_dispatch_edges_when_no_notification_present(self) -> None:
+        session = self.parse(fx.simple_session())
+        self.assertEqual(session.dispatch_edges, [])
+
     def test_progress_records_become_system_events(self) -> None:
         path = fx.write_subagent(self.tmp, [
             fx.user("go"),
