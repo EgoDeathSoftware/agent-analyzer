@@ -54,6 +54,19 @@ $SK index --state interrupted-tool     # sessions that look unfinished
 $SK index --project <name>             # narrow by project if the user named one
 ```
 
+### 1a. A killed or orphaned subagent — find it from its parent
+
+If a finding names `agent-kill` or `orphan-subagent`, the child transcript is a **separate**
+session, filtered by **its own** project — which is the worktree/cwd it ran in, not the parent's
+project name. Resolve it directly rather than guessing the project:
+
+```bash
+$SK children <parent-sid>     # every Agent dispatch from this session, resolved to its child sid
+```
+
+A dispatch reported as `resolved: no` has no `<task-notification>` match in the parent transcript
+— treat that as "could not be resolved," not as "no child exists."
+
 ### 2. Findings and timeline
 
 ```bash
@@ -62,10 +75,12 @@ $SK forensics <sid>
 
 Read top to bottom:
 
-- **Findings** — every detected anomaly (repeat calls, file thrash, read loops, error cascades,
-  hook ping-pong, killed/orphaned subagents, compaction churn, stalls, retried-after-rejection),
-  each with a line-anchored prevention hint. A session with no findings is a real, positive
-  result — say so plainly rather than padding the report.
+- **Findings** — every detected anomaly, each with a line-anchored prevention hint. A session
+  with no findings is a real, positive result — say so plainly rather than padding the report.
+  Two subagent findings look similar but mean different things: `agent-kill` is user-initiated
+  (someone stopped it); `orphan-subagent` means it was dispatched and never returned at all,
+  which usually means it stalled or the parent moved on without waiting. Name which one fired —
+  "you pulled the plug" and "it vanished" call for different follow-ups.
 - **Timeline** — only the lines the findings cite, not the whole transcript.
 - **Health** — total tool calls, success rate. This is the "what went right" counterweight; a
   98% success rate on a session that looks alarming from its `end_state` alone is worth saying.
