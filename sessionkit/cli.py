@@ -287,6 +287,117 @@ def cmd_children(corpus: Corpus, args: argparse.Namespace) -> str:
     return report.render()
 
 
+def cmd_tail(corpus: Corpus, args: argparse.Namespace) -> str:
+    """Layer 3: the last N turns of one session, plus its tail signal.
+
+    Judgment about `done vs unfinished` lives in the `unfinished-work` skill; this command
+    surfaces the material and one deterministic classification, nothing more.
+    """
+    if getattr(args, "all", False):
+        return _cmd_tail_all(corpus, args)
+    entry = query.find_session(corpus, args.sid)
+    if entry is None:
+        raise SystemExit(f"no session matching {args.sid!r} (try `sk index`)")
+    signal = query.tail_signal(entry, n=args.n)
+
+    report = Report(args.json, args.budget_kb or BUDGET_EXCERPT_KB, full=args.full)
+    report.meta(sid=entry.session.sid, project=entry.project_key,
+                state=entry.session.end_state, tail_signal=signal,
+                n=args.n, turns=entry.session.turns)
+    report.section(f"Tail (last {args.n})")
+    report.table(["line", "role", "chars", "preview"],
+                 [[r["line"], r["role"], r["chars"], r["preview"]]
+                  for r in query.tail_rows(entry, n=args.n, full=args.full)],
+                 key="tail")
+    return report.render()
+
+
+def _cmd_tail_all(corpus: Corpus, args: argparse.Namespace) -> str:
+    """Corpus scan: every non-complete, non-live session, with its tail signal."""
+    candidates = query.tail_candidates(corpus, _scope(args))
+    report = Report(args.json, args.budget_kb or BUDGET_AGGREGATE_KB, full=args.full)
+    report.meta(candidates=len(candidates), n=args.n)
+    report.section("Candidates (non-complete, not currently running)")
+    rows: list[list] = []
+    for entry in candidates:
+        signal = query.tail_signal(entry, n=args.n)
+        last = entry.session.messages[-1] if entry.session.messages else None
+        excerpt = ""
+        if last is not None:
+            tail_texts = query.tail_context(entry, n=1)
+            excerpt = tail_texts.get(last.line, last.preview or "")
+        rows.append([entry.session.sid[:8], entry.session.end_state, signal,
+                     (entry.session.ended_at or "")[:16], excerpt])
+    report.table(["sid", "state", "tail_signal", "ended", "tail_excerpt"], rows,
+                 key="candidates")
+    return report.render()
+
+
+def cmd_files(corpus: Corpus, args: argparse.Namespace) -> str:
+    """Files touched by one session, or rolled up across a project/corpus scope."""
+    if args.sid:
+        entry = query.find_session(corpus, args.sid)
+        if entry is None:
+            raise SystemExit(f"no session matching {args.sid!r} (try `sk index`)")
+        rows = query.file_rows(entry)
+        note = ""
+        if args.uncommitted:
+            dirty, note = query.uncommitted_intersection(
+                entry.session.cwd, [r["path"] for r in rows])
+            rows = [r for r in rows if r["path"] in dirty]
+        report = Report(args.json, args.budget_kb or BUDGET_AGGREGATE_KB)
+        report.meta(sid=entry.session.sid, project=entry.project_key,
+                    cwd=entry.session.cwd, paths=len(rows))
+        if args.uncommitted:
+            report.meta(uncommitted=len(rows))
+        report.section("Files")
+        report.table(
+            ["path", "reads", "writes", "edits", "first_line", "last_line"],
+            [[r["path"], r["reads"], r["writes"], r["edits"],
+              r["first_line"], r["last_line"]] for r in rows],
+            key="files",
+        )
+        if note:
+            report.text(f"git join: {note}")
+        return report.render()
+
+    rows = query.file_project_rows(corpus, _scope(args))
+    notes: list[str] = []
+    if args.uncommitted:
+        cwd_of: dict[str, str] = {}
+        for r in rows:
+            sid = r["exemplar_sid"]
+            if sid not in cwd_of:
+                exemplar = query.find_session(corpus, sid)
+                cwd_of[sid] = exemplar.session.cwd if exemplar else ""
+        by_cwd: dict[str, list[str]] = {}
+        for r in rows:
+            by_cwd.setdefault(cwd_of[r["exemplar_sid"]], []).append(r["path"])
+        dirty_all: set[str] = set()
+        for cwd, paths in by_cwd.items():
+            if not cwd:
+                continue
+            dirty, note = query.uncommitted_intersection(cwd, paths)
+            dirty_all |= dirty
+            if note:
+                notes.append(note)
+        rows = [r for r in rows if r["path"] in dirty_all]
+    report = Report(args.json, args.budget_kb or BUDGET_AGGREGATE_KB)
+    report.meta(paths=len(rows), project=args.project or "any")
+    if args.uncommitted:
+        report.meta(uncommitted=len(rows))
+    report.section("Files across scope")
+    report.table(
+        ["path", "sessions", "reads", "writes", "edits", "exemplar_sid"],
+        [[r["path"], r["sessions"], r["reads"], r["writes"], r["edits"],
+          r["exemplar_sid"][:8]] for r in rows],
+        key="files",
+    )
+    if notes:
+        report.text(f"git join: {'; '.join(sorted(set(notes)))}")
+    return report.render()
+
+
 def _headline(corpus: Corpus, scope: query.Filter, rows: list[query.Row], total: int) -> str:
     """Summarise the clusters, ranking by breadth as well as raw count.
 
@@ -485,14 +596,37 @@ def build_parser() -> argparse.ArgumentParser:
     p_forensics.add_argument("sid", help="session id or unique prefix")
 
     p_children = sub.add_parser("children", parents=[common],
-                                help="Agent dispatches from one session, resolved to child sid")
+                                 help="Agent dispatches from one session, resolved to child sid")
     p_children.add_argument("sid", help="session id or unique prefix")
+
+    p_tail = sub.add_parser("tail", parents=[common, scoped],
+                            help="last N turns of one session, with a tail signal")
+    group = p_tail.add_mutually_exclusive_group(required=True)
+    group.add_argument("sid", nargs="?", default=None,
+                       help="session id or unique prefix")
+    group.add_argument("--all", action="store_true",
+                       help="scan every non-complete session in scope (excludes live "
+                            "sessions from `sessions/*.json`)")
+    p_tail.add_argument("--n", type=int, default=6,
+                        help="number of trailing turns to include (default: 6)")
+    p_tail.add_argument("--full", action="store_true",
+                        help="re-read message text from source for full fidelity "
+                             "(JSON never truncates a cell either way)")
+    _subagents_arg(p_tail, "include")
+
+    p_files = sub.add_parser("files", parents=[common, scoped],
+                             help="files a session (or scope) touched")
+    p_files.add_argument("sid", nargs="?", default=None,
+                         help="session id or unique prefix; omit for a project rollup")
+    p_files.add_argument("--uncommitted", action="store_true",
+                         help="intersect with `git status --porcelain` in the session's cwd")
+    _subagents_arg(p_files, "include")
     return parser
 
 
 COMMANDS = {"doctor": cmd_doctor, "index": cmd_index, "show": cmd_show, "errors": cmd_errors,
-            "commands": cmd_commands, "hooks": cmd_hooks, "forensics": cmd_forensics,
-            "children": cmd_children}
+             "commands": cmd_commands, "hooks": cmd_hooks, "forensics": cmd_forensics,
+             "children": cmd_children, "tail": cmd_tail, "files": cmd_files}
 
 
 def main(argv: list[str] | None = None) -> int:

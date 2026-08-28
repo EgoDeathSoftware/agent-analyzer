@@ -1,8 +1,8 @@
 # sessionkit — what we're building
 
 **Status:** Phase 0 (scaffolding), Phase 1 (`error-patterns`) and Phase 2 (`sk commands`, `sk
-hooks`, `sk forensics`, `session-forensics`) complete and verified against the live corpus.
-Phases 3–8 planned. Last updated 2026-08-27.
+hooks`, `sk forensics`, `session-forensics`) complete and verified against the live corpus. Phase 3
+(`sk tail`, `sk files`, `unfinished-work`) complete. Phases 4–8 planned. Last updated 2026-08-28.
 
 This document answers **what is being built and what's next**. Why it is built this way is
 `SPEC.md`; what we learned along the way is `NOTES.md`. See `SPEC.md` §6 for the ownership rule —
@@ -171,7 +171,7 @@ carries a `bytes` field giving the true fetched size directly.
   `tool_use` at the tail of its transcript at all times, which `end_state` classifies as
   `interrupted-tool`. Verified: while this document was being written, the live session was
   `{"status":"busy"}` in `sessions/234.json` and looked interrupted in its own JSONL. Phase 3 must
-  read this registry and exclude live sessions, or `sk unfinished` reports every concurrently
+  read this registry and exclude live sessions, or `sk tail --all` reports every concurrently
   running session as abandoned work. Files here are removed on exit, so absence means "not
   running", and crash leftovers are cleared at next launch.
 
@@ -286,16 +286,18 @@ natural-language `--since`.
 
 ### 5.1 Commands
 
-**Shipped:** `doctor`, `index`, `show`, `errors`, `commands`, `hooks`, `forensics`, `children`.
+**Shipped:** `doctor`, `index`, `show`, `errors`, `commands`, `hooks`, `forensics`,
+`children`, `tail`, `files`.
 
-**Planned (10):** `unfinished`, `search`, `cost`, `files`, `churn`, `stores`, `digest`,
+**Planned (8):** `search`, `cost`, `churn`, `stores`, `digest`,
 `plan-diff`, `corrections`, `procedures`.
 
 Changes from the earlier draft, by the rule in §2:
 
 | Change | Command | Why |
 |---|---|---|
-| Cut | `handoff` | A handoff brief is judgment, not computation. Built by `unfinished-work` from `sk unfinished` + `sk show`. |
+| Rename | `unfinished` → `tail` | The command surfaces one deterministic classification of a session's last N turns (`tail_signal`); the judgment about done-vs-unfinished lives in the `unfinished-work` skill, not the command name. |
+| Cut | `handoff` | A handoff brief is judgment, not computation. Built by `unfinished-work` from `sk tail --all` + `sk files --uncommitted` + `sk show`. |
 | Merge | `subagents` → `cost --subagents` | Comparing child cost to parent cost is a section of a cost report, not a separate question. |
 | Add | `hooks` | The computational half of the old `hook-tuning` skill: join `hook-block` failures to `settings.json` definitions. |
 
@@ -312,7 +314,7 @@ anyway. §2 is what resolves it.
 |---|---|---|---|
 | 1 | `error-patterns` | 1 | **done** — gains a hooks section in Phase 2 |
 | 2 | `session-forensics` | 2 | **done** — stays narrow (`NOTES.md` §1) |
-| 3 | `unfinished-work` | 3 | planned |
+| 3 | `unfinished-work` | 3 | **done** |
 | 4 | `cost-forensics` | 5 | planned |
 | 5 | `edit-churn` | 6 | planned |
 | 6 | `session-digest` | 7 | planned — the `<SUMMARY_DIR>` writer only |
@@ -561,21 +563,58 @@ success, produced no commit, and left tests failing is a finding no transcript-o
   `OUTPUT_PREVIEW` raised to 2000 chars, per-cell truncation centralised in `render.py` (marked
   with `…`, never applied to JSON), and `--full` added to `sk commands`.
 
-### Phase 3 — `sk unfinished`, `sk files`, `gitlink.py`, skill `unfinished-work`
+### Phase 3 — `sk tail`, `sk files`, skill `unfinished-work` ✅
 
 `end_state` already lands correctly — `interrupted-tool` is populated in the live corpus today.
+That alone does not say whether a session's tail looks abandoned mid-action, apologetic, silent,
+or actually finished, so this phase adds a second, orthogonal classification —
+`tail_signal` — read off the session's last messages and tool calls, plus the commands
+that surface it and the git join that says what is still exposed on disk.
+
 `sk files --uncommitted` moves here from the old Phase 6, because the merged skill needs the git
-join to answer "what is at risk."
+join to answer "what is at risk." No standalone `gitlink.py` module was needed — the join is a
+handful of lines calling `subprocess.run(["git", "status", "--porcelain=v1", "-z",
+"--untracked-files=normal"], cwd=<session cwd>)` directly in `query.py`, intersected against the
+session's touched paths. A dedicated module would have held one function with no other caller.
 
-**Acceptance:** ranks by recoverability, not recency; each row carries a paste-ready
-`claude --resume <sid>` **and** a cold-start handoff brief; cross-references `files` against
-`git log` in the session window, respecting `.gitignore`.
+**`tail_signal`** is a `classify.py` taxonomy, same shape as the error taxonomy: ordered
+precedence, one value per session, never raises. In order: `mid_tool` (a `tool_use` with no
+paired result — the session ended mid-call), `error_tail` (the last tool call failed),
+`apology`, `completion_marker`, `next_step_stated`, `silent` (last turn is an unanswered user
+message), `neutral`. Order matters the same way it does for the error taxonomy (§6.1) — a
+session whose last message both apologises and states a next step is `apology`, not
+`next_step_stated`, because recovering from a stated failure takes priority over trusting a
+stated plan.
 
-**Excludes live sessions**, read from `sessions/<pid>.json` (§3.2.2). A running session always has
-an unmatched `tool_use` at the tail of its transcript and classifies as `interrupted-tool`; without
-this check `sk unfinished` reports the session you are sitting in as abandoned work. A negative
-fixture is required — a transcript with a dangling `tool_use` **and** a live registry entry must
-not appear in the report.
+**`sk tail <sid>`** prints the last N turns of one session (default 6) plus its `tail_signal`,
+interleaving any tool call whose line falls inside the window so a `mid_tool` call is shown in
+place rather than out of band. **`sk tail --all`** scans every non-`complete` session in scope and
+tables `sid`, `state` (`end_state`), `tail_signal`, `ended`, and a one-line tail excerpt — the
+candidate list the skill starts from.
+
+**`sk files <sid>`** rolls up every path a session touched (reads/writes/edits, first/last line);
+omitting `<sid>` rolls the same shape up across a project or the whole corpus, with an exemplar
+sid per path. **`--uncommitted`** intersects either shape against `git status --porcelain` in the
+session's own cwd and keeps only the paths still dirty — the answer to "what is still exposed if
+this session is never resumed."
+
+**Acceptance:**
+- `tail_signal`'s precedence order is pinned by test: a session that is both `mid_tool` and would
+  otherwise apologise classifies as `mid_tool`, and a completion-marker regex does not fire on the
+  bare progressive "working" (only genuine completion language — "done", "finished", "ready",
+  "passes", …), so `next_step_stated` ("Working on the next step now.") is not misread as done.
+- `sk tail --all` **excludes live sessions**, read from `sessions/<pid>.json` (§3.2.2). A running
+  session always has an unmatched `tool_use` at the tail of its transcript and classifies as
+  `interrupted-tool`; without this check `sk tail --all` reports the session you are sitting in as
+  abandoned work. A negative fixture is required — a transcript with a dangling `tool_use` **and**
+  a live registry entry must not appear in the candidate list.
+- `sk files --uncommitted` reports which touched paths are still dirty, not which are clean, and
+  states plainly when `git` itself is unavailable or the cwd is not a repository rather than
+  silently reporting zero uncommitted files.
+- The `unfinished-work` skill composes `sk tail --all` + `sk files --uncommitted` + `sk tail <sid>`
+  into buckets (Resume now / Review before resuming / Probably done / Sunk) and emits, per
+  Resume/Review candidate, a cold-start handoff brief ending in a paste-ready
+  `claude --resume <sid>` line — never run, only printed.
 
 ### Phase 4 — `sk search`
 

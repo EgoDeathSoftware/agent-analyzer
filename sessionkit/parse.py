@@ -150,6 +150,7 @@ class ParsedSession:
     end_state: str = "unknown"
     end_reason: str = ""
     dispatch_edges: list[tuple[str, str]] = field(default_factory=list)
+    tail_signal: str = ""
 
 
 def basename_of(path: str) -> str:
@@ -471,7 +472,10 @@ def read_line(path: str, line_no: int) -> dict[str, Any] | None:
     ``--full`` needs the original record — ``input_preview``/``output_preview``/``preview`` are
     the only copies kept in memory, each capped, and a preview built from an already-serialised
     JSON string can be cut mid-escape (docs/superpowers/plans/2026-08-28-firstrun-fixes.md
-    Task 5). Re-reading the source line is the only way to recover the true text.
+    Task 5). ``tail_context`` needs it too, because completion markers routinely land past
+    the ``MSG_PREVIEW`` cap already baked into ``Message.preview``. Returns ``None`` if the
+    file is unreadable, the line doesn't exist, or it isn't valid JSON — callers fall back
+    to the capped preview in that case.
     """
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as handle:

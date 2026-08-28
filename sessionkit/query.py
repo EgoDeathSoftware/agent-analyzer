@@ -13,7 +13,10 @@ from __future__ import annotations
 
 import fnmatch
 import json
+import os
+import subprocess
 from dataclasses import dataclass
+from pathlib import PurePath
 from typing import Any, Callable, Iterable
 
 from sessionkit import settingsjson as sj
@@ -350,6 +353,181 @@ def error_rows(entry: Loaded, full: bool = False) -> list[Row]:
     return [{"line": t.line, "name": t.name, "err_class": t.err_class,
              "output_preview": _full_output(entry, t) if full else t.output_preview}
             for t in entry.session.tools if is_failure(t)]
+
+
+# --- tail -------------------------------------------------------------------------------
+
+def tail_context(entry: Loaded, n: int = 6) -> dict[int, str]:
+    """Read the last ``n`` messages of a session and return full text keyed by line.
+
+    Uses ``parse.read_line`` so ``tail_signal`` classification sees the full message text
+    rather than the 200-char preview — completion markers routinely land past the cap.
+    A message that cannot be re-read falls back to its preview so the classifier never
+    starves.
+    """
+    from sessionkit import parse
+    result: dict[int, str] = {}
+    tail = entry.session.messages[-n:] if n > 0 else entry.session.messages
+    for message in tail:
+        record = parse.read_line(entry.session.path, message.line)
+        text = ""
+        if record is not None:
+            content = ((record.get("message") or {}).get("content")
+                       if isinstance(record.get("message"), dict) else None)
+            text = parse.block_text(content) if content is not None else ""
+        result[message.line] = text or (message.preview or "")
+    return result
+
+
+def tail_signal(entry: Loaded, n: int = 6) -> str:
+    """Compute (and memoise on the ParsedSession) the tail signal."""
+    from sessionkit.classify import derive_tail_signal
+    if entry.session.tail_signal:
+        return entry.session.tail_signal
+    signal = derive_tail_signal(entry.session, tail_context(entry, n))
+    entry.session.tail_signal = signal
+    return signal
+
+
+def tail_candidates(corpus: Corpus, scope: Filter,
+                    *, exclude_live: bool = True) -> list[Loaded]:
+    """Sessions eligible for `sk tail --all`: not `complete`, and not currently running."""
+    from sessionkit import live, sources as src_mod
+    live_set: set[str] = set()
+    if exclude_live:
+        roots = {s.root for s in src_mod.discover() if s.reachable}
+        live_set = live.live_sids(roots)
+    return [
+        entry for entry in scope.apply(corpus)
+        if entry.session.end_state != "complete" and entry.session.sid not in live_set
+    ]
+
+
+def tail_rows(entry: Loaded, n: int = 6, full: bool = False) -> list[Row]:
+    """Row shape for `sk tail <sid>`: last N messages plus their trailing tool calls."""
+    tail = entry.session.messages[-n:] if n > 0 else entry.session.messages
+    if not tail:
+        return []
+    lo = tail[0].line
+    texts = tail_context(entry, n) if full else {}
+    msg_rows = [{"line": m.line, "role": m.role, "chars": m.text_len,
+                 "preview": texts.get(m.line, m.preview) if full else m.preview}
+                for m in tail]
+    # Interleave any tool calls whose line falls inside the tail window so the reader
+    # sees mid_tool context in place, not out of band.
+    tool_rows_in_window = [
+        {"line": t.line, "role": "tool", "chars": len(t.input_preview or ""),
+         "preview": f"{t.name}: {t.input_preview or ''}"}
+        for t in entry.session.tools if t.line >= lo
+    ]
+    combined = sorted(msg_rows + tool_rows_in_window, key=lambda r: r["line"])
+    return combined
+
+
+# --- files ------------------------------------------------------------------------------
+
+def file_rows(entry: Loaded) -> list[Row]:
+    """One row per unique path in a session, with op counts split by kind.
+
+    ``FileOp`` carries no line number of its own — it's joined here against the owning
+    ``ToolCall`` by ``tool_use_id`` to recover ``first_line``/``last_line``.
+    """
+    line_of = {t.tool_use_id: t.line for t in entry.session.tools}
+    buckets: dict[str, dict[str, Any]] = {}
+    for op in entry.session.files:
+        line = line_of.get(op.tool_use_id, 0)
+        row = buckets.setdefault(op.path, {
+            "path": op.path, "reads": 0, "writes": 0, "edits": 0,
+            "first_line": line, "last_line": line,
+            "first_ts": op.ts, "last_ts": op.ts,
+        })
+        if op.op == "read":
+            row["reads"] += 1
+        elif op.op == "write":
+            row["writes"] += 1
+        elif op.op == "edit":
+            row["edits"] += 1
+        row["last_line"] = max(row["last_line"], line)
+        row["last_ts"] = op.ts if op.ts > row["last_ts"] else row["last_ts"]
+    return sorted(
+        buckets.values(),
+        key=lambda r: (-(r["reads"] + r["writes"] + r["edits"]), r["first_line"]),
+    )
+
+
+def file_project_rows(corpus: Corpus, scope: Filter) -> list[Row]:
+    """Per-path rollup across every session in scope: op counts, session count, an exemplar sid."""
+    buckets: dict[str, dict[str, Any]] = {}
+    for entry in scope.apply(corpus):
+        for op in entry.session.files:
+            row = buckets.setdefault(op.path, {
+                "path": op.path, "reads": 0, "writes": 0, "edits": 0,
+                "sessions": set(), "exemplar_sid": entry.session.sid,
+            })
+            if op.op == "read":
+                row["reads"] += 1
+            elif op.op == "write":
+                row["writes"] += 1
+            elif op.op == "edit":
+                row["edits"] += 1
+            row["sessions"].add(entry.session.sid)
+    out = []
+    for row in buckets.values():
+        row["sessions"] = len(row["sessions"])
+        out.append(row)
+    return sorted(out, key=lambda r: (-r["sessions"],
+                                      -(r["reads"] + r["writes"] + r["edits"]),
+                                      r["path"]))
+
+
+_GIT_STATUS_ARGV = (
+    "git", "status", "--porcelain=v1", "-z", "--untracked-files=normal",
+)
+
+
+def uncommitted_intersection(cwd: str, paths: list[str]) -> tuple[set[str], str]:
+    """Return the subset of ``paths`` that are dirty in ``cwd``'s git tree.
+
+    Uses a fixed argv so the call cannot mutate the tree, index, config or refs. Any
+    non-zero exit is treated as "not a repo" or a similarly benign local condition —
+    callers get an empty set and a short note rather than an exception. ``LC_ALL``/``LANG``
+    are pinned to ``C`` so the "not a git repository" stderr match is locale-independent.
+    """
+    env = {"PATH": os.environ.get("PATH", ""), "HOME": os.environ.get("HOME", ""),
+           "LC_ALL": "C", "LANG": "C"}
+    try:
+        completed = subprocess.run(
+            _GIT_STATUS_ARGV, cwd=cwd, check=False, timeout=15,
+            capture_output=True, env=env,
+        )
+    except FileNotFoundError:
+        return (set(), "git binary not found")
+    except subprocess.TimeoutExpired:
+        return (set(), "git status timed out")
+    if completed.returncode != 0:
+        stderr = completed.stderr.lower()
+        if b"not a git repository" in stderr:
+            return (set(), "not a git repo")
+        return (set(), f"git status failed (exit {completed.returncode})")
+    dirty_rel: set[str] = set()
+    # Porcelain -z separates entries with NUL; each entry is `XY <space> path`.
+    # Renames are `XY <space> new-path NUL old-path NUL`; both land as separate
+    # split segments here, but only the new path is needed for the intersection.
+    payload = completed.stdout.decode("utf-8", errors="replace")
+    for entry in payload.split("\x00"):
+        if len(entry) < 4:
+            continue
+        dirty_rel.add(entry[3:])
+    session_rels = {p: _relative_to(cwd, p) for p in paths}
+    return ({p for p, rel in session_rels.items() if rel in dirty_rel}, "")
+
+
+def _relative_to(cwd: str, path: str) -> str:
+    """Best-effort cwd-relative path, tolerant of absolute forms outside ``cwd``."""
+    try:
+        return str(PurePath(path).relative_to(PurePath(cwd)))
+    except ValueError:
+        return path
 
 
 # --- commands -----------------------------------------------------------------------------

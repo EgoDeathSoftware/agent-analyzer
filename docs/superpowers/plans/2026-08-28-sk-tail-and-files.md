@@ -284,7 +284,7 @@ TAIL_SIGNALS: tuple[str, ...] = (
 
 _APOLOGY_RE = re.compile(r"\b(sorry|apologi[sz]e|unable to|can'?t|cannot)\b", re.I)
 _COMPLETION_RE = re.compile(
-    r"\b(done|complete[ds]?|finished|shipped|ready|works|working|all set|"
+    r"\b(done|complete[ds]?|finished|shipped|ready|works|all set|"
     r"passing|passes)\b", re.I)
 _NEXT_STEP_RE = re.compile(
     r"(?:^|[\.\n])\s*(?:I(?:'|’)?ll|I will|next[,:]|next step|going to|"
@@ -362,15 +362,22 @@ git commit -m "classify: add derive_tail_signal for Phase 3 sk tail"
 ## Task 2: `sk tail <sid>` — session-scoped
 
 **Files:**
+- Modify: `sessionkit/parse.py` (add `read_line(path, line_no) -> dict | None` helper —
+  a single-line JSON re-reader missing from the current tree despite an earlier draft's
+  citation of a `parse.py:468` reference that did not survive to this branch)
 - Modify: `sessionkit/query.py` (add ~60 lines)
 - Modify: `sessionkit/corpus.py` (add one line in `load_one` calling the tail wrapper)
 - Modify: `sessionkit/cli.py` (add `cmd_tail` handler + subparser)
 - Create: `tests/test_tail.py` (session-scoped portion only)
 
 **Interfaces:**
-- Consumes: `classify.derive_tail_signal` (Task 1), `parse.read_line` (existing at
-  `parse.py:468`), `query.find_session` (existing at `query.py:220`), `render.Report`
-  (existing).
+- Consumes: `classify.derive_tail_signal` (Task 1), `query.find_session` (existing at
+  `query.py:220`), `render.Report` (existing).
+- Introduces: `parse.read_line(path: str | Path, line_no: int) -> dict[str, Any] | None`
+  — re-reads one 1-indexed line of a transcript, returns the decoded record or `None`
+  if the file is unreadable, the line doesn't exist, or the payload isn't valid JSON /
+  isn't a dict. `tail_context` uses this to see full message text past the 200-char
+  preview cap; callers must tolerate `None` and fall back to the preview.
 - Produces:
   - `query.tail_context(entry: Loaded, n: int = 6) -> dict[int, str]` — reads the last
     `n` messages of a session and returns a `{message.line: full_text}` map. Uses

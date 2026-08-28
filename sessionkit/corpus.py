@@ -95,7 +95,10 @@ def load_one(source: src.Source, path: Path, dir_name: str) -> Loaded:
     annotate_errors(session)
     session.end_state, session.end_reason = derive_end_state(session)
     anomalies = detect(session)
-    return Loaded(session, project_key(session.cwd, source.id, dir_name), anomalies)
+    loaded = Loaded(session, project_key(session.cwd, source.id, dir_name), anomalies)
+    from sessionkit import query  # local: query imports Loaded from this module
+    query.tail_signal(loaded, n=6)
+    return loaded
 
 
 def _disambiguate(sessions: list[Loaded]) -> None:
