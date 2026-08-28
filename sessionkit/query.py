@@ -19,7 +19,8 @@ from typing import Any, Callable, Iterable
 from sessionkit import settingsjson as sj
 from sessionkit.classify import ANOMALY_HINTS, signature
 from sessionkit.corpus import Corpus, Loaded
-from sessionkit.parse import ToolCall
+from sessionkit.parse import ToolCall, block_text, read_line
+from sessionkit.redact import redact
 
 Row = dict[str, Any]
 
@@ -293,22 +294,61 @@ def timeline_rows(entry: Loaded) -> list[Row]:
     return rows
 
 
-def message_rows(entry: Loaded, lo: int, hi: int) -> list[Row]:
+def _full_input(entry: Loaded, call: ToolCall) -> str:
+    """Re-read a tool call's true input from its source line (see parse.read_line)."""
+    rec = read_line(entry.session.path, call.line)
+    if rec is not None:
+        content = (rec.get("message") or {}).get("content")
+        if isinstance(content, list):
+            for block in content:
+                if (isinstance(block, dict) and block.get("type") == "tool_use"
+                        and block.get("id") == call.tool_use_id):
+                    return redact(json.dumps(block.get("input"), default=str))
+    return call.input_preview
+
+
+def _full_output(entry: Loaded, call: ToolCall) -> str:
+    """Re-read a tool result's true output from its source line."""
+    if not call.result_line:
+        return call.output_preview
+    rec = read_line(entry.session.path, call.result_line)
+    if rec is not None:
+        content = (rec.get("message") or {}).get("content")
+        if isinstance(content, list):
+            for block in content:
+                if (isinstance(block, dict) and block.get("type") == "tool_result"
+                        and block.get("tool_use_id") == call.tool_use_id):
+                    return redact(block_text(block.get("content")))
+    return call.output_preview
+
+
+def _full_message(entry: Loaded, message: Any) -> str:
+    """Re-read a message's true text from its source line."""
+    rec = read_line(entry.session.path, message.line)
+    if rec is None:
+        return message.preview
+    content = (rec.get("message") or {}).get("content")
+    return redact(block_text(content)) if content is not None else message.preview
+
+
+def message_rows(entry: Loaded, lo: int, hi: int, full: bool = False) -> list[Row]:
     """Messages within an inclusive line range."""
-    return [{"line": m.line, "role": m.role, "text_len": m.text_len, "preview": m.preview}
+    return [{"line": m.line, "role": m.role, "text_len": m.text_len,
+             "preview": _full_message(entry, m) if full else m.preview}
             for m in entry.session.messages if lo <= m.line <= hi]
 
 
-def tool_rows(entry: Loaded) -> list[Row]:
+def tool_rows(entry: Loaded, full: bool = False) -> list[Row]:
     """Every tool call in the session, in line order."""
     return [{"line": t.line, "name": t.name, "dur_ms": t.dur_ms, "err_class": t.err_class,
-             "input_preview": t.input_preview} for t in entry.session.tools]
+             "input_preview": _full_input(entry, t) if full else t.input_preview}
+            for t in entry.session.tools]
 
 
-def error_rows(entry: Loaded) -> list[Row]:
+def error_rows(entry: Loaded, full: bool = False) -> list[Row]:
     """Only the failing tool calls."""
     return [{"line": t.line, "name": t.name, "err_class": t.err_class,
-             "output_preview": t.output_preview}
+             "output_preview": _full_output(entry, t) if full else t.output_preview}
             for t in entry.session.tools if is_failure(t)]
 
 

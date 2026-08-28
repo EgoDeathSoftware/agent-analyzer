@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from sessionkit.parse import basename_of, digest, parse_file, project_key
+from sessionkit.parse import basename_of, digest, parse_file, project_key, read_line
 from tests import fixtures as fx
 
 
@@ -141,6 +141,22 @@ class ParseTest(unittest.TestCase):
         ])
         session = parse_file(path, "host")
         self.assertIn("hook_progress", [e.subtype for e in session.sysev])
+
+    def test_result_line_is_recorded_on_the_tool_call(self) -> None:
+        session = self.parse([
+            fx.user("go"),
+            fx.assistant([fx.tool_use("t1", "Bash", {"command": "ls"})]),
+            fx.tool_result("t1", "ok"),
+        ])
+        self.assertEqual(session.tools[0].result_line, 3)
+
+
+class ReadLineTest(unittest.TestCase):
+    def test_reads_exact_line_and_none_past_the_end(self) -> None:
+        path = fx.write(Path(tempfile.mkdtemp()), fx.simple_session(), name="aaaa1111.jsonl")
+        rec = read_line(str(path), 1)
+        self.assertEqual(rec["type"], "user")
+        self.assertIsNone(read_line(str(path), 999))
 
 
 class KeyTest(unittest.TestCase):

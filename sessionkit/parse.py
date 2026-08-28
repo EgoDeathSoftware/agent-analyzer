@@ -57,6 +57,7 @@ class ToolCall:
     line: int
     name: str
     ts: str
+    result_line: int = 0
     result_ts: str = ""
     dur_ms: int | None = None
     is_error: bool = False
@@ -340,7 +341,7 @@ class _Parser:
             return
         ts = str(rec.get("timestamp") or "")
         content = msg.get("content")
-        results = self._tool_results(ts, content)
+        results = self._tool_results(line_no, ts, content)
         if results:
             return  # a results-only turn is transport, not a prompt
 
@@ -354,7 +355,7 @@ class _Parser:
             text_len=len(text), preview=preview(text, MSG_PREVIEW),
         ))
 
-    def _tool_results(self, ts: str, content: Any) -> int:
+    def _tool_results(self, line_no: int, ts: str, content: Any) -> int:
         """Pair ``tool_result`` blocks with their pending calls. Returns how many were found."""
         if not isinstance(content, list):
             return 0
@@ -368,6 +369,7 @@ class _Parser:
                 continue
             body = block_text(block.get("content"))
             call.result_ts = ts
+            call.result_line = line_no
             call.dur_ms = _delta_ms(call.ts, ts)
             call.is_error = bool(block.get("is_error"))
             call.out_bytes = len(body)
@@ -461,6 +463,28 @@ def parse_file(path: Path, source_id: str) -> ParsedSession:
     if out.is_subagent:
         out.agent_type = _agent_type(path)
     return out
+
+
+def read_line(path: str, line_no: int) -> dict[str, Any] | None:
+    """Re-read one exact transcript line, bypassing every in-memory preview cap.
+
+    ``--full`` needs the original record — ``input_preview``/``output_preview``/``preview`` are
+    the only copies kept in memory, each capped, and a preview built from an already-serialised
+    JSON string can be cut mid-escape (docs/superpowers/plans/2026-08-28-firstrun-fixes.md
+    Task 5). Re-reading the source line is the only way to recover the true text.
+    """
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as handle:
+            for i, line in enumerate(handle, start=1):
+                if i == line_no:
+                    try:
+                        rec = json.loads(line)
+                    except json.JSONDecodeError:
+                        return None
+                    return rec if isinstance(rec, dict) else None
+    except OSError:
+        return None
+    return None
 
 
 def _agent_type(path: Path) -> str:

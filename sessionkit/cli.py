@@ -319,7 +319,7 @@ def cmd_show(corpus: Corpus, args: argparse.Namespace) -> str:
         raise SystemExit(f"no session matching {args.sid!r} (try `sk index`)")
     session = entry.session
 
-    report = Report(args.json, args.budget_kb or BUDGET_EXCERPT_KB)
+    report = Report(args.json, args.budget_kb or BUDGET_EXCERPT_KB, full=args.full)
     report.meta(sid=session.sid, project=entry.project_key, model=session.model,
                 state=session.end_state, turns=session.turns,
                 cost=human_cost(session.cost_usd), path=session.path)
@@ -367,25 +367,26 @@ def _show_messages(entry: corpus_mod.Loaded, args: argparse.Namespace,
     report.section(f"Messages {lo}:{hi}")
     report.table(["line", "role", "chars", "preview"],
                  [[r["line"], r["role"], r["text_len"], r["preview"]]
-                  for r in query.message_rows(entry, lo, hi)],
+                  for r in query.message_rows(entry, lo, hi, full=args.full)],
                  key="messages")
 
 
-def _show_tools(entry: corpus_mod.Loaded, _args: argparse.Namespace, report: Report) -> None:
+def _show_tools(entry: corpus_mod.Loaded, args: argparse.Namespace, report: Report) -> None:
     """Every tool call in the session."""
     report.section("Tool calls")
     report.table(["line", "tool", "ms", "err", "input"],
                  [[r["line"], r["name"], r["dur_ms"], r["err_class"] or "",
-                   r["input_preview"]] for r in query.tool_rows(entry)], key="tools")
+                   r["input_preview"]] for r in query.tool_rows(entry, full=args.full)],
+                 key="tools")
 
 
-def _show_errors(entry: corpus_mod.Loaded, _args: argparse.Namespace, report: Report) -> None:
+def _show_errors(entry: corpus_mod.Loaded, args: argparse.Namespace, report: Report) -> None:
     """Only the failing tool calls, with their fix hints."""
     report.section("Errors")
     report.table(["line", "tool", "class", "fix", "detail"],
                  [[r["line"], r["name"], r["err_class"],
                    classify_error(r["output_preview"])[1],
-                   r["output_preview"] or ""] for r in query.error_rows(entry)],
+                   r["output_preview"] or ""] for r in query.error_rows(entry, full=args.full)],
                  key="errors")
 
 
@@ -455,6 +456,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_show.add_argument("--mode", default="summary",
                         choices=["summary", "timeline", "messages", "tools", "errors"])
     p_show.add_argument("--range", help="line range for --mode messages, e.g. 40:80")
+    p_show.add_argument("--full", action="store_true",
+                        help="re-read tool/message text from source for full fidelity, past "
+                             "the in-memory preview cap (JSON never truncates a cell either way)")
 
     p_err = sub.add_parser("errors", parents=[common, scoped],
                            help="cluster tool failures fleet-wide (layer 2)")

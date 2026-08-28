@@ -729,5 +729,36 @@ class IndexColumnsTest(unittest.TestCase):
         self.assertIn("agent_type", out["sessions"][0])
 
 
+class ShowFullTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        tmp = Path(self._tmp.name)
+        self.home = tmp / "claude"
+        self.home.mkdir()
+        (tmp / "empty.env").write_text("", encoding="utf-8")
+        patcher = mock.patch.dict(os.environ, {
+            "CLAUDE_DIR": str(self.home), "SESSIONKIT_ENV": str(tmp / "empty.env")})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _args(self, *argv: str):
+        return cli.build_parser().parse_args(list(argv))
+
+    def test_full_recovers_a_tool_input_past_the_preview_cap(self) -> None:
+        long_arg = "x" * 3000  # past INPUT_PREVIEW=2000
+        fx.write(self.home, [
+            fx.user("go"),
+            fx.assistant([fx.tool_use("t1", "Bash", {"command": long_arg})]),
+            fx.tool_result("t1", "ok"),
+        ], name="aaaa1111.jsonl")
+        loaded = corpus.load()
+        sid = loaded.sessions[0].session.sid
+        capped = cli.cmd_show(loaded, self._args("show", sid, "--mode", "tools"))
+        full = cli.cmd_show(loaded, self._args("show", sid, "--mode", "tools", "--full"))
+        self.assertNotIn(long_arg, capped)
+        self.assertIn(long_arg, full)
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
