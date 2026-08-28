@@ -20,29 +20,37 @@ from sessionkit.render import (BUDGET_AGGREGATE_KB, BUDGET_EXCERPT_KB, BUDGET_IN
 
 _DURATION = re.compile(r"^(\d+)\s*([hdw])$", re.I)
 _UNITS = {"h": "hours", "d": "days", "w": "weeks"}
+_ABSOLUTE = re.compile(r"^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2})?)?$")
 
 
 def since_cutoff(value: str | None) -> str:
-    """Convert a ``7d``/``12h``/``2w`` window into an ISO-8601 cutoff timestamp.
+    """Convert a ``7d``/``12h``/``2w`` window, or an absolute ``YYYY-MM-DD[THH:MM[:SS]]`` date,
+    into an ISO-8601 cutoff timestamp.
 
     Args:
-        value: Relative duration, or ``None`` for no cutoff.
+        value: A relative duration, an absolute date/datetime, or ``None`` for no cutoff.
 
     Returns:
         An ISO timestamp string, or ``""`` when no cutoff applies.
 
     Raises:
-        SystemExit: If the duration cannot be parsed — a silently-ignored ``--since`` would
-            make a partial report look complete.
+        SystemExit: If neither form parses — a silently-ignored ``--since`` would make a partial
+            report look complete.
     """
     if not value:
         return ""
-    match = _DURATION.match(value.strip())
-    if not match:
-        raise SystemExit(f"unrecognised --since value {value!r}; expected e.g. 7d, 12h, 2w")
-    amount, unit = int(match.group(1)), match.group(2).lower()
-    cutoff = datetime.now(timezone.utc) - timedelta(**{_UNITS[unit]: amount})
-    return cutoff.isoformat().replace("+00:00", "Z")
+    value = value.strip()
+    match = _DURATION.match(value)
+    if match:
+        amount, unit = int(match.group(1)), match.group(2).lower()
+        cutoff = datetime.now(timezone.utc) - timedelta(**{_UNITS[unit]: amount})
+        return cutoff.isoformat().replace("+00:00", "Z")
+    if _ABSOLUTE.match(value):
+        iso = value if "T" in value else f"{value}T00:00:00"
+        dt = datetime.fromisoformat(iso).replace(tzinfo=timezone.utc)
+        return dt.isoformat().replace("+00:00", "Z")
+    raise SystemExit(f"unrecognised --since value {value!r}; expected e.g. 7d, 12h, 2w, or an "
+                     "absolute date/time like 2026-08-17 or 2026-08-17T14:30")
 
 
 def _scope(args: argparse.Namespace) -> query.Filter:
