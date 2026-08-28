@@ -185,6 +185,28 @@ def block_text(content: Any) -> str:
     return "\n".join(p for p in parts if p)
 
 
+def read_line(path: str | Path, line_no: int) -> dict[str, Any] | None:
+    """Re-read one line of a transcript by its 1-indexed line number.
+
+    ``tail_context`` needs this because completion markers routinely land past the
+    ``MSG_PREVIEW`` cap already baked into ``Message.preview``. Returns ``None`` if the
+    file is unreadable, the line doesn't exist, or it isn't valid JSON — callers fall back
+    to the capped preview in that case.
+    """
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as handle:
+            for current, raw in enumerate(handle, start=1):
+                if current == line_no:
+                    try:
+                        rec = json.loads(raw.strip())
+                    except json.JSONDecodeError:
+                        return None
+                    return rec if isinstance(rec, dict) else None
+    except OSError:
+        return None
+    return None
+
+
 def digest(value: Any) -> str:
     """Stable short hash of a tool input, used to detect repeated identical calls."""
     try:

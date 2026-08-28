@@ -304,6 +304,61 @@ def error_rows(entry: Loaded) -> list[Row]:
             for t in entry.session.tools if is_failure(t)]
 
 
+# --- tail -------------------------------------------------------------------------------
+
+def tail_context(entry: Loaded, n: int = 6) -> dict[int, str]:
+    """Read the last ``n`` messages of a session and return full text keyed by line.
+
+    Uses ``parse.read_line`` so ``tail_signal`` classification sees the full message text
+    rather than the 200-char preview — completion markers routinely land past the cap.
+    A message that cannot be re-read falls back to its preview so the classifier never
+    starves.
+    """
+    from sessionkit import parse
+    result: dict[int, str] = {}
+    tail = entry.session.messages[-n:] if n > 0 else entry.session.messages
+    for message in tail:
+        record = parse.read_line(entry.session.path, message.line)
+        text = ""
+        if record is not None:
+            content = ((record.get("message") or {}).get("content")
+                       if isinstance(record.get("message"), dict) else None)
+            text = parse.block_text(content) if content is not None else ""
+        result[message.line] = text or (message.preview or "")
+    return result
+
+
+def tail_signal(entry: Loaded, n: int = 6) -> str:
+    """Compute (and memoise on the ParsedSession) the tail signal."""
+    from sessionkit.classify import derive_tail_signal
+    if entry.session.tail_signal:
+        return entry.session.tail_signal
+    signal = derive_tail_signal(entry.session, tail_context(entry, n))
+    entry.session.tail_signal = signal
+    return signal
+
+
+def tail_rows(entry: Loaded, n: int = 6, full: bool = False) -> list[Row]:
+    """Row shape for `sk tail <sid>`: last N messages plus their trailing tool calls."""
+    tail = entry.session.messages[-n:] if n > 0 else entry.session.messages
+    if not tail:
+        return []
+    lo = tail[0].line
+    texts = tail_context(entry, n) if full else {}
+    msg_rows = [{"line": m.line, "role": m.role, "chars": m.text_len,
+                 "preview": texts.get(m.line, m.preview) if full else m.preview}
+                for m in tail]
+    # Interleave any tool calls whose line falls inside the tail window so the reader
+    # sees mid_tool context in place, not out of band.
+    tool_rows_in_window = [
+        {"line": t.line, "role": "tool", "chars": len(t.input_preview or ""),
+         "preview": f"{t.name}: {t.input_preview or ''}"}
+        for t in entry.session.tools if t.line >= lo
+    ]
+    combined = sorted(msg_rows + tool_rows_in_window, key=lambda r: r["line"])
+    return combined
+
+
 # --- commands -----------------------------------------------------------------------------
 
 def _owner_sid(entry: Loaded) -> str:

@@ -240,6 +240,29 @@ def cmd_forensics(corpus: Corpus, args: argparse.Namespace) -> str:
     return report.render()
 
 
+def cmd_tail(corpus: Corpus, args: argparse.Namespace) -> str:
+    """Layer 3: the last N turns of one session, plus its tail signal.
+
+    Judgment about `done vs unfinished` lives in the `unfinished-work` skill; this command
+    surfaces the material and one deterministic classification, nothing more.
+    """
+    entry = query.find_session(corpus, args.sid)
+    if entry is None:
+        raise SystemExit(f"no session matching {args.sid!r} (try `sk index`)")
+    signal = query.tail_signal(entry, n=args.n)
+
+    report = Report(args.json, args.budget_kb or BUDGET_EXCERPT_KB, full=args.full)
+    report.meta(sid=entry.session.sid, project=entry.project_key,
+                state=entry.session.end_state, tail_signal=signal,
+                n=args.n, turns=entry.session.turns)
+    report.section(f"Tail (last {args.n})")
+    report.table(["line", "role", "chars", "preview"],
+                 [[r["line"], r["role"], r["chars"], r["preview"]]
+                  for r in query.tail_rows(entry, n=args.n, full=args.full)],
+                 key="tail")
+    return report.render()
+
+
 def _headline(corpus: Corpus, scope: query.Filter, rows: list[query.Row], total: int) -> str:
     """Summarise the clusters, ranking by breadth as well as raw count.
 
@@ -429,11 +452,21 @@ def build_parser() -> argparse.ArgumentParser:
     p_forensics = sub.add_parser("forensics", parents=[common],
                                  help="why one session went wrong (layer 3)")
     p_forensics.add_argument("sid", help="session id or unique prefix")
+
+    p_tail = sub.add_parser("tail", parents=[common],
+                            help="last N turns of one session, with a tail signal")
+    p_tail.add_argument("sid", help="session id or unique prefix")
+    p_tail.add_argument("--n", type=int, default=6,
+                        help="number of trailing turns to include (default: 6)")
+    p_tail.add_argument("--full", action="store_true",
+                        help="re-read message text from source for full fidelity "
+                             "(JSON never truncates a cell either way)")
     return parser
 
 
 COMMANDS = {"doctor": cmd_doctor, "index": cmd_index, "show": cmd_show, "errors": cmd_errors,
-            "commands": cmd_commands, "hooks": cmd_hooks, "forensics": cmd_forensics}
+            "commands": cmd_commands, "hooks": cmd_hooks, "forensics": cmd_forensics,
+            "tail": cmd_tail}
 
 
 def main(argv: list[str] | None = None) -> int:
