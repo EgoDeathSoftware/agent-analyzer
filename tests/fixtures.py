@@ -37,12 +37,14 @@ def tool_use(tid: str, name: str, tool_input: dict[str, Any]) -> dict[str, Any]:
 
 
 def tool_result(tid: str, body: str, is_error: bool = False,
-                ts: str = "2026-08-01T00:00:02Z") -> dict[str, Any]:
-    """A user turn carrying one ``tool_result`` block."""
+                ts: str = "2026-08-01T00:00:02Z", **extra: Any) -> dict[str, Any]:
+    """A user turn carrying one ``tool_result`` block. ``**extra`` attaches sibling top-level
+    fields such as ``toolUseResult`` — the transcript's *second*, untruncated copy of a large
+    result (PLAN.md §3.2.1) — alongside the possibly-stub ``message.content``."""
     return {"type": "user", "sessionId": SID, "cwd": CWD, "timestamp": ts, "uuid": f"r-{tid}",
             "message": {"role": "user", "content": [
                 {"type": "tool_result", "tool_use_id": tid, "content": body,
-                 "is_error": is_error}]}}
+                 "is_error": is_error}]}, **extra}
 
 
 def system(subtype: str, ts: str = "2026-08-01T00:00:03Z", **extra: Any) -> dict[str, Any]:

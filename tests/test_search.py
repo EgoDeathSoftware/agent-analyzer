@@ -39,6 +39,68 @@ class SearchScan(unittest.TestCase):
         with self.assertRaises(SystemExit):
             search.compile_query("", regex=False, case_sensitive=False)
 
+    def _source(self, root):
+        from sessionkit.sources import Source
+        return Source(id="host", kind="claude-code", layout="single", location="host",
+                     root=root, reachable=True)
+
+    def test_scan_corpus_finds_hit_in_a_plain_message(self) -> None:
+        import tempfile
+        from pathlib import Path
+        from tests import fixtures as fx
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            fx.write(home, [fx.user("please find the loose banana crate")])
+            pattern = search.compile_query("banana", regex=False, case_sensitive=False)
+            hits = search.scan_corpus([self._source(home)], pattern)
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(hits[0].kind, "jsonl")
+        self.assertIn("banana", hits[0].raw_line.lower())
+
+    def test_scan_corpus_finds_hit_only_in_toolUseResult_not_the_stub(self) -> None:
+        # The transcript's message.content stub never contains the needle — only the sibling
+        # toolUseResult field does, exactly reproducing PLAN.md §3.2.1's two-copies problem.
+        # ToolCall.output_preview (parse.py) is built from message.content alone, so a scan of
+        # any in-memory preview would report zero hits here; the raw line must not.
+        import tempfile
+        from pathlib import Path
+        from tests import fixtures as fx
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            fx.write(home, [
+                fx.user("run it"),
+                fx.assistant([fx.tool_use("t1", "Bash", {"command": "grep -R banana"})]),
+                fx.tool_result("t1", "Output too large (93.7KB) — see <persisted-output>",
+                               toolUseResult={"content": "x" * 3000 + " needle-in-haystack "
+                                              + "y" * 3000}),
+            ])
+            pattern = search.compile_query("needle-in-haystack", regex=False,
+                                           case_sensitive=False)
+            hits = search.scan_corpus([self._source(home)], pattern)
+        self.assertEqual(len(hits), 1)
+        self.assertNotIn("needle-in-haystack",
+                         "Output too large (93.7KB) — see <persisted-output>")  # sanity
+
+    def test_scan_corpus_max_hits_per_file_caps_results(self) -> None:
+        import tempfile
+        from pathlib import Path
+        from tests import fixtures as fx
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            fx.write(home, [fx.user(f"banana #{i}", ts=f"2026-08-01T00:0{i}:00Z")
+                            for i in range(5)])
+            pattern = search.compile_query("banana", regex=False, case_sensitive=False)
+            hits = search.scan_corpus([self._source(home)], pattern, max_hits_per_file=2)
+        self.assertEqual(len(hits), 2)
+
+    def test_scan_corpus_skips_unreachable_sources(self) -> None:
+        from sessionkit.sources import Source
+        from pathlib import Path
+        unreachable = Source(id="gone", kind="claude-code", layout="single", location="host",
+                             root=Path("/does/not/exist"), reachable=False)
+        pattern = search.compile_query("banana", regex=False, case_sensitive=False)
+        self.assertEqual(search.scan_corpus([unreachable], pattern), [])
+
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
