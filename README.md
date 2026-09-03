@@ -51,6 +51,14 @@ than no report.
 | `index` | Layer 1 session list; `--since --project --source --state --subagents` |
 | `show <sid>` | Layer 3 excerpt; `--mode summary\|timeline\|messages\|tools\|errors` |
 | `errors` | Layer 2 failure clusters; `--group-by class\|tool\|signature\|session` |
+| `commands` | Every tool call fleet-wide; `--group-by command\|tool\|session\|agent --agent-type` |
+| `hooks` | Hook block/deny failures joined against `settings.json` |
+| `forensics <sid>` | Layer 3: why one session went wrong |
+| `children <sid>` | Agent dispatches from one session, resolved to child sid |
+| `cost [sid]` | Layer 2/3 token/dollar totals; `--bloat --subagents` |
+| `tail <sid>\|--all` | Last N turns of one session, with a tail signal |
+| `files [sid]` | Files a session (or scope) touched; `--uncommitted` |
+| `search <query>` | Layer 2 full-text search across every transcript; `--regex --context --per-session` |
 
 Session ids accept a unique prefix: `sk show 95f3a6a6`.
 

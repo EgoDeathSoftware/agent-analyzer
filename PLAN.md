@@ -712,6 +712,18 @@ paid for 2 KB" is itself the signal that spilling worked.
 - `.claude.json:lastModelUsage` cross-checks only a session that is its project's *most recent*
   one, per §3.2.2's own limit; `sk cost <sid>` reports the comparison when it applies and says
   nothing when it doesn't, rather than a misleading "no data."
+- **"Report both columns where they diverge" (line 675-676) is not implemented.** No `toolUseResult`
+  size is captured anywhere — `parse.py` never reads it (§3.2.1's "measure `message.content`, not
+  `toolUseResult`" constraint means the byte count needed for the second column doesn't exist in
+  `ParsedSession` at all). Adding it needs a `parse.py` change this phase didn't scope; deferred to
+  a later phase.
+- **"attributing dollars to each" (line 680) is not implemented for any `--bloat` finding** — every
+  finding reports bytes and counts only. `repeat_read_rows`' own docstring argues why *that*
+  finding can't be honestly dollarized (re-read content is paid for again across every later turn's
+  input/cache tokens, which can't be isolated). `oversized_tool_rows` and `unbounded_bash_rows`
+  could be dollarized via the existing `pricing.cost`; this phase made a deliberate bytes-only
+  choice for all findings instead, for consistency across the section rather than dollarizing some
+  and not others.
 
 ### Phase 6 — `sk churn`, `filehistory.py`, `sk stores`, skill `edit-churn`
 

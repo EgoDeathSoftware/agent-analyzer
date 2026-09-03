@@ -703,6 +703,21 @@ class CostTest(unittest.TestCase):
         out = cli.cmd_cost(corp, self._args("cost", "--subagents"))
         self.assertIn("dispatch", out.lower())
 
+    def test_corpus_rollup_states_top_level_vs_subagent_split(self) -> None:
+        fx.write(self.home, [
+            fx.user("go"),
+            fx.assistant([fx.tool_use("d1", "Agent", {"description": "Do the thing"})]),
+            fx.task_notification("d1", "childone01"),
+        ], name="aaaa1111.jsonl")
+        fx.write_subagent(self.home, fx.simple_session(), agent_id="childone01")
+        corp = corpus.load()
+        out = cli.cmd_cost(corp, self._args("cost", "--json"))
+        payload = json.loads(out)
+        self.assertEqual(payload["top_level"], 1)
+        self.assertEqual(payload["subagent"], 1)
+        kinds = {row["kind"] for row in payload["sessions"]}
+        self.assertEqual(kinds, {"top-level", "subagent"})
+
     def test_json_never_truncates_and_both_flags_work_before_and_after_subcommand(self) -> None:
         fx.write(self.home, fx.simple_session(), name="aaaa1111.jsonl")
         corp = corpus.load()

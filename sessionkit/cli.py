@@ -310,15 +310,23 @@ def cmd_cost(corpus: Corpus, args: argparse.Namespace) -> str:
 
 
 def _cmd_cost_corpus(corpus: Corpus, args: argparse.Namespace, scope: query.Filter) -> str:
-    """Fleet-wide cost rollup, one row per session."""
+    """Fleet-wide cost rollup, one row per session.
+
+    Includes subagent sessions by default (Filter's own default), so `sessions` here can exceed
+    `sk index`'s count and the --subagents footer's parent-only total — meta and the table's
+    `kind` column state that split explicitly rather than leaving the discrepancy unexplained."""
     rows = scope.apply(corpus)
     total = sum(e.session.cost_usd for e in rows)
+    top_level = sum(1 for e in rows if not e.session.is_subagent)
+    subagent = sum(1 for e in rows if e.session.is_subagent)
     report = Report(args.json, args.budget_kb or BUDGET_AGGREGATE_KB)
-    report.meta(sessions=len(rows), total_cost=human_cost(total))
+    report.meta(sessions=len(rows), top_level=top_level, subagent=subagent,
+               total_cost=human_cost(total))
     report.section("Cost by session")
     report.table(
-        ["sid", "project", "model", "cost", "tok_in", "tok_out"],
-        [[e.session.sid[:8], e.project_key, _short_model(e.session.model),
+        ["sid", "kind", "project", "model", "cost", "tok_in", "tok_out"],
+        [[e.session.sid[:8], "subagent" if e.session.is_subagent else "top-level",
+          e.project_key, _short_model(e.session.model),
           f"{e.session.cost_usd:.2f}", e.session.tok_in, e.session.tok_out]
          for e in sorted(rows, key=lambda e: -e.session.cost_usd)],
         key="sessions",
