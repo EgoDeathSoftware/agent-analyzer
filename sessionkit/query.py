@@ -16,7 +16,7 @@ import json
 import os
 import subprocess
 from dataclasses import dataclass
-from pathlib import PurePath
+from pathlib import Path, PurePath
 from typing import Any, Callable, Iterable
 
 from sessionkit import pricing, settingsjson as sj
@@ -962,3 +962,34 @@ def subagent_cost_summary(corpus: Corpus, scope: Filter) -> Row:
         "child_cost_total": sum(r["cost_usd"] for r in resolved),
         "parent_cost_total": parent_total,
     }
+
+
+def _claude_json_paths(corpus: Corpus) -> list[Path]:
+    """Every reachable single-layout claude-code source's sibling ``.claude.json``,
+    deduplicated. ``.claude.json`` lives next to ``~/.claude``, not inside it."""
+    seen: set[Path] = set()
+    for source in corpus.sources:
+        if source.reachable and source.kind == "claude-code" and source.layout == "single":
+            seen.add(source.root.parent / ".claude.json")
+    return sorted(seen)
+
+
+def claude_json_cost_check(corpus: Corpus, entry: Loaded) -> Row | None:
+    """Cross-check one session's computed cost against Claude Code's own
+    ``lastModelUsage`` figure (PLAN.md §3.2.2) — an independent third source, computed by
+    Claude Code itself rather than either hand-maintained pricing table. Returns ``None`` when
+    this session is not its project's *last* session (the only one ``lastModelUsage`` covers)
+    or no ``.claude.json`` could be read for its cwd.
+    """
+    for path in _claude_json_paths(corpus):
+        if not path.is_file():
+            continue
+        if sj.read_last_session_id(path, entry.session.cwd) != entry.session.sid:
+            continue
+        usage = sj.read_last_model_usage(path, entry.session.cwd)
+        if not usage:
+            continue
+        claude_json_cost = sum(float(m.get("costUSD") or 0.0) for m in usage.values())
+        return {"claude_json_cost": claude_json_cost, "sk_cost": entry.session.cost_usd,
+               "delta": entry.session.cost_usd - claude_json_cost}
+    return None

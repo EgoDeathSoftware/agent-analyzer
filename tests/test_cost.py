@@ -194,5 +194,38 @@ class SubagentDispatchTest(CostQueryTestBase):
         self.assertIn("child_cost_total", summary)
 
 
+class ClaudeJsonCostCheckTest(CostQueryTestBase):
+    def test_matches_when_this_session_is_the_project_last_session(self) -> None:
+        fx.write(self.home, fx.simple_session(), name="aaaa1111.jsonl")
+        (self.home.parent / ".claude.json").write_text(
+            __import__("json").dumps({"projects": {fx.CWD: {
+                "lastSessionId": fx.SID,
+                "lastModelUsage": {"claude-opus-5": {"costUSD": 0.5}},
+            }}}), encoding="utf-8")
+        corp = corpus.load()
+        entry = corp.sessions[0]
+        check = query.claude_json_cost_check(corp, entry)
+        self.assertIsNotNone(check)
+        self.assertAlmostEqual(check["claude_json_cost"], 0.5)
+        self.assertAlmostEqual(check["sk_cost"], entry.session.cost_usd)
+
+    def test_none_when_session_is_not_the_last_one(self) -> None:
+        fx.write(self.home, fx.simple_session(), name="aaaa1111.jsonl")
+        (self.home.parent / ".claude.json").write_text(
+            __import__("json").dumps({"projects": {fx.CWD: {
+                "lastSessionId": "someone-else",
+                "lastModelUsage": {"claude-opus-5": {"costUSD": 0.5}},
+            }}}), encoding="utf-8")
+        corp = corpus.load()
+        entry = corp.sessions[0]
+        self.assertIsNone(query.claude_json_cost_check(corp, entry))
+
+    def test_none_when_no_claude_json_present(self) -> None:
+        fx.write(self.home, fx.simple_session(), name="aaaa1111.jsonl")
+        corp = corpus.load()
+        entry = corp.sessions[0]
+        self.assertIsNone(query.claude_json_cost_check(corp, entry))
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
