@@ -7,6 +7,7 @@ by `test_tail_signal.py`/`test_tail.py`.
 
 from __future__ import annotations
 
+import json
 import unittest
 
 from sessionkit import search
@@ -380,6 +381,85 @@ class SearchScan(unittest.TestCase):
                                            case_sensitive=False)
             rows, _ = search.search_rows([self._source(home)], self._empty_scope(), pattern)
         self.assertIn("needle-past-output-cap", rows[0]["excerpt"])
+
+
+class SearchCli(unittest.TestCase):
+    def setUp(self) -> None:
+        import os
+        import tempfile
+        from pathlib import Path
+        from unittest import mock
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp = Path(self._tmp.name)
+        self.home = self.tmp / "claude"
+        self.home.mkdir()
+        env_file = self.tmp / "empty.env"
+        env_file.write_text("", encoding="utf-8")
+        patcher = mock.patch.dict(os.environ, {
+            "CLAUDE_DIR": str(self.home),
+            "SESSIONKIT_ENV": str(env_file),
+        })
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _run(self, *argv: str) -> str:
+        import io
+        from contextlib import redirect_stdout
+        from sessionkit import cli
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            self.assertEqual(cli.main(list(argv)), 0)
+        return buf.getvalue()
+
+    def test_search_cli_prints_matches_as_json(self) -> None:
+        from tests import fixtures as fx
+        fx.write(self.home, [fx.user("please find the loose banana crate")])
+        out = self._run("search", "banana", "--json")
+        payload = json.loads(out)
+        self.assertEqual(payload["hits"], 1)
+        self.assertEqual(len(payload["matches"]), 1)
+        self.assertIn("banana", payload["matches"][0]["excerpt"].lower())
+
+    def test_search_cli_text_mode_renders_a_table(self) -> None:
+        from tests import fixtures as fx
+        fx.write(self.home, [fx.user("please find the loose banana crate")])
+        out = self._run("search", "banana")
+        self.assertIn("Matches", out)
+        self.assertIn(fx.SID[:8], out)
+
+    def test_search_cli_empty_query_exits_nonzero(self) -> None:
+        with self.assertRaises(SystemExit):
+            self._run("search", "")
+
+    def test_search_cli_bad_regex_exits_nonzero(self) -> None:
+        with self.assertRaises(SystemExit):
+            self._run("search", "(unclosed", "--regex")
+
+    def test_search_cli_respects_project_flag(self) -> None:
+        from tests import fixtures as fx
+        fx.write(self.home, [fx.user("banana in project one")])
+        out = self._run("search", "banana", "--project", "nonexistent", "--json")
+        payload = json.loads(out)
+        self.assertEqual(payload["hits"], 0)
+
+    def test_search_cli_json_never_truncates_a_long_excerpt(self) -> None:
+        from tests import fixtures as fx
+        long_text = "banana " + ("x" * 500) + " tail-marker-end"
+        fx.write(self.home, [fx.user(long_text)])
+        out = self._run("search", "tail-marker-end", "--json")
+        payload = json.loads(out)
+        self.assertIn("tail-marker-end", payload["matches"][0]["excerpt"])
+
+    def test_search_cli_reports_degraded_spill_matches(self) -> None:
+        spill_dir = self.home / "projects" / "-home-dev-myproject" / "orphan-sid" / \
+            "tool-results"
+        spill_dir.mkdir(parents=True)
+        (spill_dir / "toolu_x.txt").write_text("needle-in-spill", encoding="utf-8")
+        out = self._run("search", "needle-in-spill", "--json")
+        payload = json.loads(out)
+        self.assertEqual(payload["hits"], 0)
+        self.assertTrue(any("spilled tool-results" in n for n in payload.get("notes", [])))
 
 
 if __name__ == "__main__":  # pragma: no cover

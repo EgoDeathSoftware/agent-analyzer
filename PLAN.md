@@ -287,9 +287,9 @@ natural-language `--since`.
 ### 5.1 Commands
 
 **Shipped:** `doctor`, `index`, `show`, `errors`, `commands`, `hooks`, `forensics`,
-`children`, `tail`, `files`.
+`children`, `tail`, `files`, `search`.
 
-**Planned (8):** `search`, `cost`, `churn`, `stores`, `digest`,
+**Planned (7):** `cost`, `churn`, `stores`, `digest`,
 `plan-diff`, `corrections`, `procedures`.
 
 Changes from the earlier draft, by the rule in §2:
@@ -616,18 +616,39 @@ this session is never resumed."
   Resume/Review candidate, a cold-start handoff brief ending in a paste-ready
   `claude --resume <sid>` line — never run, only printed.
 
-### Phase 4 — `sk search`
+### Phase 4 — `sk search` ✅
 
-No skill. `sk search` scans the corpus directly — 7 ms for a full-corpus pass — joined to
-on-demand parse for context.
+No skill. `sk search` raw-scans every transcript's lines directly (`sessionkit/search.py`,
+`docs/superpowers/plans/2026-09-02-sk-search.md`), then parses — via the existing
+`corpus.load_one` — only the files that matched, for `--since`/`--project`/`--source`/
+`--subagents` scope filtering and a line-anchored context excerpt built from full, uncapped
+re-reads of the surrounding messages/tool calls/tool results (`query.full_message`/`full_input`/
+`full_output`, promoted from private helpers for this phase).
 
-**Acceptance:** a known past error returns the session that hit it **and the resolution excerpt**
-in ≤4 KB. No degradation path is needed; there is no index to be absent.
+**Acceptance met:** a query present anywhere in a session's raw transcript lines returns that
+session, its matched line and kind, and a context excerpt, in ≤4 KB (`BUDGET_AGGREGATE_KB`, the
+same default every layer-2 command uses). No degradation path was needed — there is no index to
+be absent, matching the original acceptance.
 
-Scan whole JSONL lines, not the rendered message content: a spilled tool result keeps only a 2 KB
-preview in `message.content` while `toolUseResult` retains the full text on the same line (§3.2.1).
-Fall back to `tool-results/toolu_<id>.txt` only where the transcript has aged out from under the
-spill files, and say so in the output when it happens.
+Matches the whole raw JSONL line, not any in-memory preview: a query present only in a spilled
+tool result's `toolUseResult` field (the transcript's untruncated second copy) still hits, even
+though `ToolCall.output_preview` — and every other in-memory preview — is built from
+`message.content` alone and would silently miss it (§3.2.1). The excerpt itself re-reads the true
+source line (`query.full_message`/`full_input`/`full_output`, promoted from private to public
+for this), so an ordinary long message or tool input/output past its fixed preview cap still
+shows the matched text in full — the "JSON never truncates" contract holds for the excerpt, not
+just the row count. One honest, narrower limitation remains: `toolUseResult` itself is not
+modelled anywhere in `ParsedSession` — only the raw scan sees it — so when a match falls *only*
+inside that field (or a spilled `tool-results/*.txt` file with no line of its own), the row is
+still returned with the correct session and line, but the excerpt cannot quote the match
+verbatim and falls back to the record's normal (redacted) text instead. Recall is guaranteed;
+verbatim quoting in the excerpt is not, in that one case.
+
+Falls back to `<project>/<sid>/tool-results/toolu_<id>.txt` for the case the transcript's own
+copy has genuinely aged out from under it, and reports how many such matches could not be
+resolved to a transcript rather than silently dropping them. Scoped to top-level sessions — a
+subagent's own `tool-results/` layout, if one exists, is unverified against a live corpus and out
+of scope for this phase.
 
 ### Phase 5 — `sk cost`, skill `cost-forensics`
 
