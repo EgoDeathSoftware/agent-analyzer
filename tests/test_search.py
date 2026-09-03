@@ -136,6 +136,166 @@ class SearchScan(unittest.TestCase):
             pattern = search.compile_query("banana", regex=False, case_sensitive=False)
             self.assertEqual(search.scan_corpus([self._source(Path(tmp))], pattern), [])
 
+    def _empty_scope(self):
+        from sessionkit.query import Filter
+        return Filter()
+
+    def test_search_rows_returns_a_row_with_a_context_excerpt(self) -> None:
+        import tempfile
+        from pathlib import Path
+        from tests import fixtures as fx
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            fx.write(home, [
+                fx.user("please find the loose banana crate"),
+                fx.assistant([{"type": "text", "text": "found it, fixed."}],
+                             ts="2026-08-01T00:00:01Z"),
+            ])
+            pattern = search.compile_query("banana", regex=False, case_sensitive=False)
+            rows, degraded = search.search_rows([self._source(home)], self._empty_scope(),
+                                                 pattern)
+        self.assertEqual(degraded, 0)
+        self.assertEqual(len(rows), 1)
+        self.assertIn("banana", rows[0]["excerpt"].lower())
+        self.assertEqual(rows[0]["kind"], "msg")
+
+    def test_search_rows_finds_a_hit_even_when_the_excerpt_cannot_quote_it(self) -> None:
+        # The needle lives only in the top-level toolUseResult field (Task 2's key scenario).
+        # Even query.full_output's re-read only ever looks inside message.content's
+        # tool_result block, never at a sibling toolUseResult key, so it cannot recover this
+        # text either — the row must still be returned. Recall over the session is what
+        # matters; PLAN.md §7 Phase 4's acceptance is "returns the session that hit it", not a
+        # guarantee about exemplar wording.
+        import tempfile
+        from pathlib import Path
+        from tests import fixtures as fx
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            fx.write(home, [
+                fx.user("run it"),
+                fx.assistant([fx.tool_use("t1", "Bash", {"command": "grep -R banana"})]),
+                fx.tool_result("t1", "Output too large (93.7KB) — see <persisted-output>",
+                               toolUseResult={"content": "x" * 3000 + " needle-in-haystack "
+                                              + "y" * 3000}),
+            ])
+            pattern = search.compile_query("needle-in-haystack", regex=False,
+                                           case_sensitive=False)
+            rows, degraded = search.search_rows([self._source(home)], self._empty_scope(),
+                                                 pattern)
+        self.assertEqual(degraded, 0)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["sid"], fx.SID)
+
+    def test_search_rows_marks_the_matched_line_in_the_excerpt(self) -> None:
+        import tempfile
+        from pathlib import Path
+        from tests import fixtures as fx
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            fx.write(home, [
+                fx.user("start", ts="2026-08-01T00:00:00Z"),
+                fx.assistant([{"type": "text", "text": "ok"}], ts="2026-08-01T00:00:01Z"),
+                fx.user("find the banana", ts="2026-08-01T00:00:02Z"),
+                fx.assistant([{"type": "text", "text": "found it"}],
+                             ts="2026-08-01T00:00:03Z"),
+            ])
+            pattern = search.compile_query("banana", regex=False, case_sensitive=False)
+            rows, _ = search.search_rows([self._source(home)], self._empty_scope(), pattern,
+                                         context=1)
+        self.assertIn(">>", rows[0]["excerpt"])  # the hit line is marked, not just present
+
+    def test_search_rows_respects_project_scope(self) -> None:
+        import tempfile
+        from pathlib import Path
+        from tests import fixtures as fx
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            fx.write(home, [fx.user("banana in project one")])
+            other_dir = home / "projects" / "-home-dev-otherproject"
+            other_dir.mkdir(parents=True)
+            (other_dir / "22222222-2222-2222-2222-222222222222.jsonl").write_text(
+                '{"type":"user","sessionId":"22222222-2222-2222-2222-222222222222",'
+                '"cwd":"/home/dev/otherproject","timestamp":"2026-08-01T00:00:00Z",'
+                '"uuid":"u1","message":{"role":"user","content":"banana in project two"}}\n',
+                encoding="utf-8")
+            from sessionkit.query import Filter
+            pattern = search.compile_query("banana", regex=False, case_sensitive=False)
+            rows, _ = search.search_rows([self._source(home)], Filter(project="otherproject"),
+                                         pattern)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["project"], "otherproject")
+
+    def test_search_rows_per_session_caps_hits_across_the_whole_session(self) -> None:
+        import tempfile
+        from pathlib import Path
+        from tests import fixtures as fx
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            fx.write(home, [fx.user(f"banana #{i}", ts=f"2026-08-01T00:0{i}:00Z")
+                            for i in range(4)])
+            pattern = search.compile_query("banana", regex=False, case_sensitive=False)
+            rows, _ = search.search_rows([self._source(home)], self._empty_scope(), pattern,
+                                         per_session=1)
+        self.assertEqual(len(rows), 1)
+
+    def test_search_rows_limit_caps_total_rows_across_sessions(self) -> None:
+        import tempfile
+        from pathlib import Path
+        from tests import fixtures as fx
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            for i in range(3):
+                sid = f"{i}" * 8 + "-0000-0000-0000-000000000000"
+                project = home / "projects" / "-home-dev-myproject"
+                project.mkdir(parents=True, exist_ok=True)
+                (project / f"{sid}.jsonl").write_text(
+                    f'{{"type":"user","sessionId":"{sid}","cwd":"/home/dev/myproject",'
+                    f'"timestamp":"2026-08-01T00:00:0{i}Z","uuid":"u{i}",'
+                    f'"message":{{"role":"user","content":"banana session {i}"}}}}\n',
+                    encoding="utf-8")
+            pattern = search.compile_query("banana", regex=False, case_sensitive=False)
+            rows, _ = search.search_rows([self._source(home)], self._empty_scope(), pattern,
+                                         limit=2)
+        self.assertEqual(len(rows), 2)
+
+    def test_search_rows_resolves_a_spill_hit_to_its_tool_result_line(self) -> None:
+        import tempfile
+        from pathlib import Path
+        from tests import fixtures as fx
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            fx.write(home, [
+                fx.user("run it"),
+                fx.assistant([fx.tool_use("toolu_spill1", "Bash", {"command": "true"})]),
+                fx.tool_result("toolu_spill1", "Output too large (9KB)"),
+            ])
+            self._write_spill(home, "-home-dev-myproject", fx.SID, "toolu_spill1",
+                              "needle-in-spill")
+            pattern = search.compile_query("needle-in-spill", regex=False,
+                                           case_sensitive=False)
+            rows, degraded = search.search_rows([self._source(home)], self._empty_scope(),
+                                                 pattern)
+        self.assertEqual(degraded, 0)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["sid"], fx.SID)
+        self.assertEqual(rows[0]["kind"], "result")
+
+    def test_search_rows_reports_degraded_when_spill_transcript_is_missing(self) -> None:
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            # A spill file with no sibling <sid>.jsonl at all — the "aged out" case where the
+            # transcript itself is gone but the spill directory survived.
+            self._write_spill(home, "-home-dev-myproject", "orphan-sid", "toolu_x",
+                              "needle-in-spill")
+            pattern = search.compile_query("needle-in-spill", regex=False,
+                                           case_sensitive=False)
+            rows, degraded = search.search_rows([self._source(home)], self._empty_scope(),
+                                                 pattern)
+        self.assertEqual(rows, [])
+        self.assertEqual(degraded, 1)
+
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

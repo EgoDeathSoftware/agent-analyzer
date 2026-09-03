@@ -297,7 +297,7 @@ def timeline_rows(entry: Loaded) -> list[Row]:
     return rows
 
 
-def _full_input(entry: Loaded, call: ToolCall) -> str:
+def full_input(entry: Loaded, call: ToolCall) -> str:
     """Re-read a tool call's true input from its source line (see parse.read_line)."""
     rec = read_line(entry.session.path, call.line)
     if rec is not None:
@@ -310,7 +310,7 @@ def _full_input(entry: Loaded, call: ToolCall) -> str:
     return call.input_preview
 
 
-def _full_output(entry: Loaded, call: ToolCall) -> str:
+def full_output(entry: Loaded, call: ToolCall) -> str:
     """Re-read a tool result's true output from its source line."""
     if not call.result_line:
         return call.output_preview
@@ -325,7 +325,7 @@ def _full_output(entry: Loaded, call: ToolCall) -> str:
     return call.output_preview
 
 
-def _full_message(entry: Loaded, message: Any) -> str:
+def full_message(entry: Loaded, message: Any) -> str:
     """Re-read a message's true text from its source line."""
     rec = read_line(entry.session.path, message.line)
     if rec is None:
@@ -337,21 +337,21 @@ def _full_message(entry: Loaded, message: Any) -> str:
 def message_rows(entry: Loaded, lo: int, hi: int, full: bool = False) -> list[Row]:
     """Messages within an inclusive line range."""
     return [{"line": m.line, "role": m.role, "text_len": m.text_len,
-             "preview": _full_message(entry, m) if full else m.preview}
+             "preview": full_message(entry, m) if full else m.preview}
             for m in entry.session.messages if lo <= m.line <= hi]
 
 
 def tool_rows(entry: Loaded, full: bool = False) -> list[Row]:
     """Every tool call in the session, in line order."""
     return [{"line": t.line, "name": t.name, "dur_ms": t.dur_ms, "err_class": t.err_class,
-             "input_preview": _full_input(entry, t) if full else t.input_preview}
+             "input_preview": full_input(entry, t) if full else t.input_preview}
             for t in entry.session.tools]
 
 
 def error_rows(entry: Loaded, full: bool = False) -> list[Row]:
     """Only the failing tool calls."""
     return [{"line": t.line, "name": t.name, "err_class": t.err_class,
-             "output_preview": _full_output(entry, t) if full else t.output_preview}
+             "output_preview": full_output(entry, t) if full else t.output_preview}
             for t in entry.session.tools if is_failure(t)]
 
 
