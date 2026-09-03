@@ -407,19 +407,27 @@ def cmd_search(corpus: Corpus, args: argparse.Namespace) -> str:
     `toolUseResult` copy sits on the same line as the truncated stub. No index: only files
     that already matched get parsed, for scope filtering and a line-anchored excerpt.
     """
+    if args.per_session < 0 or args.limit < 0:
+        raise SystemExit("--per-session and --limit must be >= 0 (0 means unlimited)")
     pattern = search.compile_query(args.query, regex=args.regex,
                                    case_sensitive=args.case_sensitive)
     scope = _scope(args)
-    rows, degraded = search.search_rows(
+    rows, degraded, total = search.search_rows(
         corpus.sources, scope, pattern, context=args.context,
         per_session=args.per_session, limit=args.limit)
 
     report = Report(args.json, args.budget_kb or BUDGET_AGGREGATE_KB, full=args.full)
-    report.meta(query=args.query, regex=args.regex, hits=len(rows))
+    report.meta(query=args.query, regex=args.regex, hits=total, shown=len(rows))
+    if total > len(rows):
+        report.text(f"{total - len(rows)} additional match(es) exist beyond --limit/"
+                    "--per-session and are not shown; raise --limit or --per-session to see "
+                    "them.")
     if degraded:
         report.text(f"{degraded} match(es) found only in a spilled tool-results/ file whose "
-                    "transcript could not be resolved and are omitted from the count above — "
-                    "the session's own copy has aged out from under the spill file.")
+                    "transcript could not be resolved and are omitted from the count above "
+                    "(checked regardless of --project/--since scope, since an unresolvable "
+                    "spill has no parsed session to filter against) — the session's own copy "
+                    "has aged out from under the spill file.")
     report.section("Matches")
     report.table(
         ["sid", "project", "line", "kind", "excerpt"],
@@ -658,11 +666,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_search.add_argument("query", help="text to search for (or a pattern with --regex)")
     p_search.add_argument("--regex", action="store_true",
                           help="treat query as a regular expression")
-    p_search.add_argument("--case-sensitive", action="store_true")
+    p_search.add_argument("--case-sensitive", action="store_true",
+                          help="match case exactly instead of folding it")
     p_search.add_argument("--context", type=int, default=2,
-                          help="timeline rows of context before/after each hit (default: 2)")
+                          help="lines of context before/after each hit, by transcript line "
+                               "number, not turn count (default: 2)")
     p_search.add_argument("--per-session", type=int, default=1,
-                          help="max hits shown per session; 0 for unlimited (default: 1)")
+                          help="max hits shown per session, keeping the most recent match(es) "
+                               "first; 0 for unlimited (default: 1)")
     p_search.add_argument("--limit", type=int, default=20,
                           help="max hit rows returned overall; 0 for unlimited (default: 20)")
     p_search.add_argument("--full", action="store_true",

@@ -153,8 +153,8 @@ class SearchScan(unittest.TestCase):
                              ts="2026-08-01T00:00:01Z"),
             ])
             pattern = search.compile_query("banana", regex=False, case_sensitive=False)
-            rows, degraded = search.search_rows([self._source(home)], self._empty_scope(),
-                                                 pattern)
+            rows, degraded, _ = search.search_rows([self._source(home)], self._empty_scope(),
+                                                   pattern)
         self.assertEqual(degraded, 0)
         self.assertEqual(len(rows), 1)
         self.assertIn("banana", rows[0]["excerpt"].lower())
@@ -181,8 +181,8 @@ class SearchScan(unittest.TestCase):
             ])
             pattern = search.compile_query("needle-in-haystack", regex=False,
                                            case_sensitive=False)
-            rows, degraded = search.search_rows([self._source(home)], self._empty_scope(),
-                                                 pattern)
+            rows, degraded, _ = search.search_rows([self._source(home)], self._empty_scope(),
+                                                   pattern)
         self.assertEqual(degraded, 0)
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["sid"], fx.SID)
@@ -201,8 +201,8 @@ class SearchScan(unittest.TestCase):
                              ts="2026-08-01T00:00:03Z"),
             ])
             pattern = search.compile_query("banana", regex=False, case_sensitive=False)
-            rows, _ = search.search_rows([self._source(home)], self._empty_scope(), pattern,
-                                         context=1)
+            rows, _, _ = search.search_rows([self._source(home)], self._empty_scope(), pattern,
+                                            context=1)
         self.assertIn(">>", rows[0]["excerpt"])  # the hit line is marked, not just present
 
     def test_search_rows_respects_project_scope(self) -> None:
@@ -221,8 +221,8 @@ class SearchScan(unittest.TestCase):
                 encoding="utf-8")
             from sessionkit.query import Filter
             pattern = search.compile_query("banana", regex=False, case_sensitive=False)
-            rows, _ = search.search_rows([self._source(home)], Filter(project="otherproject"),
-                                         pattern)
+            rows, _, _ = search.search_rows([self._source(home)], Filter(project="otherproject"),
+                                            pattern)
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["project"], "otherproject")
 
@@ -235,8 +235,8 @@ class SearchScan(unittest.TestCase):
             fx.write(home, [fx.user(f"banana #{i}", ts=f"2026-08-01T00:0{i}:00Z")
                             for i in range(4)])
             pattern = search.compile_query("banana", regex=False, case_sensitive=False)
-            rows, _ = search.search_rows([self._source(home)], self._empty_scope(), pattern,
-                                         per_session=1)
+            rows, _, _ = search.search_rows([self._source(home)], self._empty_scope(), pattern,
+                                            per_session=1)
         self.assertEqual(len(rows), 1)
 
     def test_search_rows_limit_caps_total_rows_across_sessions(self) -> None:
@@ -255,8 +255,8 @@ class SearchScan(unittest.TestCase):
                     f'"message":{{"role":"user","content":"banana session {i}"}}}}\n',
                     encoding="utf-8")
             pattern = search.compile_query("banana", regex=False, case_sensitive=False)
-            rows, _ = search.search_rows([self._source(home)], self._empty_scope(), pattern,
-                                         limit=2)
+            rows, _, _ = search.search_rows([self._source(home)], self._empty_scope(), pattern,
+                                            limit=2)
         self.assertEqual(len(rows), 2)
 
     def test_search_rows_resolves_a_spill_hit_to_its_tool_result_line(self) -> None:
@@ -274,8 +274,8 @@ class SearchScan(unittest.TestCase):
                               "needle-in-spill")
             pattern = search.compile_query("needle-in-spill", regex=False,
                                            case_sensitive=False)
-            rows, degraded = search.search_rows([self._source(home)], self._empty_scope(),
-                                                 pattern)
+            rows, degraded, _ = search.search_rows([self._source(home)], self._empty_scope(),
+                                                   pattern)
         self.assertEqual(degraded, 0)
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["sid"], fx.SID)
@@ -292,8 +292,8 @@ class SearchScan(unittest.TestCase):
                               "needle-in-spill")
             pattern = search.compile_query("needle-in-spill", regex=False,
                                            case_sensitive=False)
-            rows, degraded = search.search_rows([self._source(home)], self._empty_scope(),
-                                                 pattern)
+            rows, degraded, _ = search.search_rows([self._source(home)], self._empty_scope(),
+                                                   pattern)
         self.assertEqual(rows, [])
         self.assertEqual(degraded, 1)
 
@@ -316,7 +316,7 @@ class SearchScan(unittest.TestCase):
             ])
             pattern = search.compile_query("needle-in-mode-record", regex=False,
                                            case_sensitive=False)
-            rows, _ = search.search_rows([self._source(home)], self._empty_scope(), pattern)
+            rows, _, _ = search.search_rows([self._source(home)], self._empty_scope(), pattern)
         self.assertEqual(rows[0]["kind"], "raw")
         self.assertIn("needle-in-mode-record", rows[0]["excerpt"])
 
@@ -341,8 +341,8 @@ class SearchScan(unittest.TestCase):
                               "the needle-in-both-copies text")
             pattern = search.compile_query("needle-in-both-copies", regex=False,
                                            case_sensitive=False)
-            rows, degraded = search.search_rows([self._source(home)], self._empty_scope(),
-                                                 pattern, per_session=0)
+            rows, degraded, _ = search.search_rows([self._source(home)], self._empty_scope(),
+                                                   pattern, per_session=0)
         self.assertEqual(degraded, 0)
         self.assertEqual(len(rows), 1)
 
@@ -358,7 +358,7 @@ class SearchScan(unittest.TestCase):
             fx.write(home, [fx.user(long_text)])
             pattern = search.compile_query("needle-past-msg-cap", regex=False,
                                            case_sensitive=False)
-            rows, _ = search.search_rows([self._source(home)], self._empty_scope(), pattern)
+            rows, _, _ = search.search_rows([self._source(home)], self._empty_scope(), pattern)
         self.assertIn("needle-past-msg-cap", rows[0]["excerpt"])
 
     def test_search_rows_excerpt_shows_tool_output_past_the_preview_cap(self) -> None:
@@ -379,8 +379,42 @@ class SearchScan(unittest.TestCase):
             ])
             pattern = search.compile_query("needle-past-output-cap", regex=False,
                                            case_sensitive=False)
-            rows, _ = search.search_rows([self._source(home)], self._empty_scope(), pattern)
+            rows, _, _ = search.search_rows([self._source(home)], self._empty_scope(), pattern)
         self.assertIn("needle-past-output-cap", rows[0]["excerpt"])
+
+    def test_search_rows_excerpt_is_windowed_around_a_huge_match_not_the_full_text(self) -> None:
+        import tempfile
+        from pathlib import Path
+        from tests import fixtures as fx
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            huge = ("z" * 5000) + " needle-in-huge-text " + ("z" * 5000)
+            fx.write(home, [fx.user(huge)])
+            pattern = search.compile_query("needle-in-huge-text", regex=False,
+                                           case_sensitive=False)
+            rows, _, _ = search.search_rows([self._source(home)], self._empty_scope(), pattern)
+        self.assertIn("needle-in-huge-text", rows[0]["excerpt"])
+        self.assertLess(len(rows[0]["excerpt"]), 1000)  # windowed, not ~10KB of raw text
+
+    def test_search_rows_total_exceeds_shown_when_limit_caps_results(self) -> None:
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            for i in range(3):
+                sid = f"{i}" * 8 + "-0000-0000-0000-000000000000"
+                project = home / "projects" / "-home-dev-myproject"
+                project.mkdir(parents=True, exist_ok=True)
+                (project / f"{sid}.jsonl").write_text(
+                    f'{{"type":"user","sessionId":"{sid}","cwd":"/home/dev/myproject",'
+                    f'"timestamp":"2026-08-01T00:00:0{i}Z","uuid":"u{i}",'
+                    f'"message":{{"role":"user","content":"banana session {i}"}}}}\n',
+                    encoding="utf-8")
+            pattern = search.compile_query("banana", regex=False, case_sensitive=False)
+            rows, _, total = search.search_rows([self._source(home)], self._empty_scope(),
+                                                pattern, limit=2)
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(total, 3)
 
 
 class SearchCli(unittest.TestCase):
@@ -460,6 +494,42 @@ class SearchCli(unittest.TestCase):
         payload = json.loads(out)
         self.assertEqual(payload["hits"], 0)
         self.assertTrue(any("spilled tool-results" in n for n in payload.get("notes", [])))
+
+    def test_search_cli_json_stays_within_budget_for_a_huge_tool_result(self) -> None:
+        from tests import fixtures as fx
+        huge = ("z" * 20000) + " needle-in-huge-output " + ("z" * 20000)
+        fx.write(self.home, [
+            fx.user("run it"),
+            fx.assistant([fx.tool_use("t1", "Bash", {"command": "true"})]),
+            fx.tool_result("t1", huge),
+        ])
+        out = self._run("search", "needle-in-huge-output", "--json")
+        payload = json.loads(out)
+        self.assertEqual(payload["hits"], 1)
+        self.assertEqual(len(payload["matches"]), 1)  # not silently dropped by the budget
+        self.assertIn("needle-in-huge-output", payload["matches"][0]["excerpt"])
+        self.assertLess(len(out), 4200)
+
+    def test_search_cli_reports_when_limit_hides_matches(self) -> None:
+        for i in range(3):
+            sid = f"{i}" * 8 + "-0000-0000-0000-000000000000"
+            project = self.home / "projects" / "-home-dev-myproject"
+            project.mkdir(parents=True, exist_ok=True)
+            (project / f"{sid}.jsonl").write_text(
+                f'{{"type":"user","sessionId":"{sid}","cwd":"/home/dev/myproject",'
+                f'"timestamp":"2026-08-01T00:00:0{i}Z","uuid":"u{i}",'
+                f'"message":{{"role":"user","content":"banana session {i}"}}}}\n',
+                encoding="utf-8")
+        out = self._run("search", "banana", "--limit", "2", "--json")
+        payload = json.loads(out)
+        self.assertEqual(payload["hits"], 3)
+        self.assertEqual(payload["shown"], 2)
+        self.assertTrue(any("--limit" in n or "--per-session" in n
+                            for n in payload.get("notes", [])))
+
+    def test_search_cli_rejects_negative_limit(self) -> None:
+        with self.assertRaises(SystemExit):
+            self._run("search", "banana", "--limit", "-1")
 
 
 if __name__ == "__main__":  # pragma: no cover

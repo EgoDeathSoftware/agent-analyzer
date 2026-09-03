@@ -49,7 +49,7 @@ def compile_query(text: str, *, regex: bool, case_sensitive: bool) -> re.Pattern
 
 #: A file-level safety valve, not a user-facing setting: a pathologically common query (a bare
 #: word appearing hundreds of times in one huge transcript) should not force-read the whole
-#: match set before `search_rows` (Task 4) even gets to apply `--per-session`/`--limit`.
+#: match set before :func:`search_rows` even gets to apply ``--per-session``/``--limit``.
 _MAX_HITS_PER_FILE = 50
 
 
@@ -58,8 +58,8 @@ class Hit:
     """One raw-text match, not yet resolved to a session.
 
     ``line_no`` is the 1-based JSONL line for a ``kind="jsonl"`` hit, or ``0`` for a
-    ``kind="spill"`` hit (Task 3) until :func:`search_rows` (Task 4) maps it back to the
-    transcript line whose tool call produced the spilled result.
+    ``kind="spill"`` hit until :func:`search_rows` maps it back to the transcript line whose
+    tool call produced the spilled result.
     """
 
     kind: str
@@ -93,7 +93,7 @@ def scan_corpus(sources: list[Source], pattern: re.Pattern[str], *,
     for source in scannable(sources):
         for path, dir_name in corpus.transcripts(source):
             hits.extend(_scan_jsonl(source, path, dir_name, pattern, max_hits_per_file))
-        hits.extend(_scan_spill_files(source, pattern, max_hits_per_file))
+        hits.extend(_scan_spill_files(source, pattern))
     return hits
 
 
@@ -119,12 +119,14 @@ def _scan_jsonl(source: Source, path: Path, dir_name: str, pattern: re.Pattern[s
     return found
 
 
-def _scan_spill_files(source: Source, pattern: re.Pattern[str], max_hits: int) -> list[Hit]:
+def _scan_spill_files(source: Source, pattern: re.Pattern[str]) -> list[Hit]:
     """Match ``pattern`` against every ``<project>/<sid>/tool-results/*.txt`` file.
 
     This third copy of a spilled result (PLAN.md §3.2.1) is needed only when the
     transcript's own ``toolUseResult`` copy has aged out from under it — the common case is
     already covered by :func:`_scan_jsonl`, so this pass exists purely for that fallback.
+    Unlike :func:`_scan_jsonl`, there is no hit cap here: one spill file can only ever
+    produce one hit (the whole file is the unit), so a "hits per file" cap doesn't apply.
     """
     found: list[Hit] = []
     root = source.projects_dir
@@ -142,8 +144,6 @@ def _scan_spill_files(source: Source, pattern: re.Pattern[str], max_hits: int) -
         if pattern.search(text):
             dir_name = spill_path.parent.parent.parent.name
             found.append(Hit("spill", source.id, dir_name, str(spill_path), 0, text))
-            if max_hits and len(found) >= max_hits:
-                break
     return found
 
 
@@ -152,9 +152,10 @@ Row = dict[str, Any]
 
 def search_rows(sources: list[Source], scope: query.Filter, pattern: re.Pattern[str], *,
                 context: int = 2, per_session: int = 1, limit: int = 20
-                ) -> tuple[list[Row], int]:
+                ) -> tuple[list[Row], int, int]:
     """Search rows for `sk search`: fast raw scan, then on-demand parse of only the files that
-    matched, for scope filtering and a line-anchored context excerpt.
+    matched, for scope filtering — and only *then* excerpt building, after capping, so a huge
+    matching file never pays for more excerpts than will actually be shown.
 
     Args:
         sources: Candidate sources, as returned by ``sessionkit.sources.discover()``.
@@ -165,9 +166,11 @@ def search_rows(sources: list[Source], scope: query.Filter, pattern: re.Pattern[
         limit: Max rows returned overall; ``0`` for unlimited.
 
     Returns:
-        ``(rows, degraded)`` — ``degraded`` counts spill-file matches whose transcript could
-        not be resolved (missing entirely, or no longer names the matched ``tool_use_id``),
-        reported by the caller rather than silently dropped.
+        ``(rows, degraded, total)``. ``degraded`` counts spill-file matches whose transcript
+        could not be resolved (missing entirely, or no longer names the matched
+        ``tool_use_id``), reported by the caller rather than silently dropped. ``total`` is
+        the in-scope, deduplicated candidate count *before* ``per_session``/``limit`` capping,
+        so a caller can report when rows were hidden rather than silently truncating.
     """
     hits = scan_corpus(sources, pattern)
     by_file: dict[tuple[str, str], list[Hit]] = {}
@@ -175,7 +178,7 @@ def search_rows(sources: list[Source], scope: query.Filter, pattern: re.Pattern[
         by_file.setdefault((hit.source_id, hit.path), []).append(hit)
 
     by_source = {s.id: s for s in sources}
-    all_rows: list[Row] = []
+    candidates: list[tuple[Loaded, Hit]] = []
     seen_lines: set[tuple[str, int]] = set()
     degraded = 0
     for (source_id, path), file_hits in by_file.items():
@@ -198,31 +201,41 @@ def search_rows(sources: list[Source], scope: query.Filter, pattern: re.Pattern[
         if not scope.matches(entry):
             continue
         for hit in resolved:
-            key = (entry.session.sid, hit.line_no)
+            # Keyed on the transcript's own path, not sid: two real transcripts can share a
+            # session id (corpus.py's _disambiguate exists precisely because it happens), and
+            # search_rows calls corpus.load_one directly rather than corpus.load(), so that
+            # disambiguation never runs here. A resolved spill hit shares its transcript's
+            # entry.session.path with the jsonl hit for the same result, so this still
+            # dedupes the spill/transcript double-match case.
+            key = (entry.session.path, hit.line_no)
             if key in seen_lines:
                 continue
             seen_lines.add(key)
-            all_rows.append(_build_row(entry, hit, context))
+            candidates.append((entry, hit))
 
-    all_rows.sort(key=lambda r: (r["_ended_at"] or "", r["line"]), reverse=True)
-    capped = _cap_per_session(all_rows, per_session) if per_session else all_rows
-    result = capped[:limit] if limit else capped
-    for row in result:
-        row.pop("_ended_at", None)
-    return result, degraded
+    candidates.sort(key=lambda pair: (pair[0].session.ended_at or "", pair[1].line_no),
+                    reverse=True)
+    capped = _cap_per_session(candidates, per_session) if per_session else candidates
+    total = len(capped)
+    survivors = capped[:limit] if limit else capped
+    rows = [_build_row(entry, hit, context, pattern) for entry, hit in survivors]
+    return rows, degraded, total
 
 
-def _cap_per_session(rows: list[Row], per_session: int) -> list[Row]:
-    """Keep at most ``per_session`` rows per ``sid``, preserving the incoming (newest-first)
-    order — applied after sorting so a session's *best* hits survive, not its first-scanned."""
+def _cap_per_session(candidates: list[tuple[Loaded, Hit]], per_session: int
+                     ) -> list[tuple[Loaded, Hit]]:
+    """Keep at most ``per_session`` candidates per ``sid``, preserving the incoming
+    (newest-first) order — applied after sorting so a session's *best* (most recent-line)
+    hits survive, not its first-scanned."""
     seen: dict[str, int] = {}
-    kept: list[Row] = []
-    for row in rows:
-        n = seen.get(row["sid"], 0)
+    kept: list[tuple[Loaded, Hit]] = []
+    for entry, hit in candidates:
+        sid = entry.session.sid
+        n = seen.get(sid, 0)
         if n >= per_session:
             continue
-        seen[row["sid"]] = n + 1
-        kept.append(row)
+        seen[sid] = n + 1
+        kept.append((entry, hit))
     return kept
 
 
@@ -258,8 +271,8 @@ def _spill_transcript_path(spill_path: Path) -> Path:
 
 
 #: (line, kind, name, text) — text is always the full, uncapped, redacted re-read, never the
-#: fixed-width Message.preview/ToolCall.*_preview kept in memory (see this task's rationale
-#: above `search_rows`).
+#: fixed-width Message.preview/ToolCall.*_preview kept in memory, because a match can lie
+#: past where those previews cut off; display bounding happens later, in `_bounded_text`.
 _Entry = tuple[int, str, str, str]
 
 
@@ -291,31 +304,54 @@ def _context_entries(entry: Loaded, center_line: int, context: int) -> list[_Ent
     return entries
 
 
-def _format_excerpt(entries: list[_Entry], center_line: int) -> str:
-    """Join context entries into one line, marking the hit with ``>>``."""
+#: Characters of context shown on each side of a match inside one excerpt entry. A real
+#: transcript line averages 2.4 KB and maxes at 51 KB (PLAN.md §2) — without this, a single
+#: huge tool result blows the report's whole byte budget on one row (verified: an untrimmed
+#: excerpt around a ~40 KB tool result produced `{"hits": 1, "matches": [], "omitted": ...}`
+#: under the default 4 KB JSON budget).
+_EXCERPT_WINDOW = 200
+
+
+def _bounded_text(text: str, pattern: re.Pattern[str]) -> str:
+    """Bound one entry's text for display: a window around the match if this entry's text
+    contains one, otherwise a flat preview — never the full uncapped text.
+    """
+    match = pattern.search(text)
+    if match is None:
+        return text if len(text) <= _EXCERPT_WINDOW else text[:_EXCERPT_WINDOW] + "…"
+    lo = max(0, match.start() - _EXCERPT_WINDOW)
+    hi = min(len(text), match.end() + _EXCERPT_WINDOW)
+    prefix = "…" if lo > 0 else ""
+    suffix = "…" if hi < len(text) else ""
+    return prefix + text[lo:hi] + suffix
+
+
+def _format_excerpt(entries: list[_Entry], center_line: int, pattern: re.Pattern[str]) -> str:
+    """Join context entries into one line, marking the hit with ``>>``. Each entry's text is
+    bounded by :func:`_bounded_text` so no single entry can dominate the report's byte budget.
+    """
     parts = []
     for line, kind, name, text in entries:
         marker = ">>" if line == center_line else "  "
-        parts.append(f"{marker}{line} {kind} {name}: {text}".strip())
+        parts.append(f"{marker}{line} {kind} {name}: {_bounded_text(text, pattern)}".strip())
     return " | ".join(parts)
 
 
-def _build_row(entry: Loaded, hit: Hit, context: int) -> Row:
-    """One search-result row: session identity plus a line-anchored context excerpt.
+def _build_row(entry: Loaded, hit: Hit, context: int, pattern: re.Pattern[str]) -> Row:
+    """One search-result row: session identity plus a line-anchored, bounded context excerpt.
 
-    A match found only in a spilled result's full ``toolUseResult`` text (never modeled in
-    ``ParsedSession`` at all — only the raw scan in Task 2 sees it) has no re-readable "true"
-    text at this line's normal record shape either, so the excerpt falls back to the raw
-    matched line itself; the row's ``sid``/``line`` are still correct.
+    A match on a record type ``_context_entries`` doesn't model at all (e.g. a bare
+    ``type: "mode"`` record) has no entry exactly at ``hit.line_no``; the excerpt then falls
+    back to the raw matched line itself, still bounded to a window around the match.
     """
     entries = _context_entries(entry, hit.line_no, context) if hit.line_no else []
     center = next((e for e in entries if e[0] == hit.line_no), None)
-    excerpt = _format_excerpt(entries, hit.line_no) if center else redact_text(hit.raw_line)
+    excerpt = (_format_excerpt(entries, hit.line_no, pattern) if center
+               else _bounded_text(redact_text(hit.raw_line), pattern))
     return {
         "sid": entry.session.sid,
         "project": entry.project_key,
         "line": hit.line_no,
         "kind": center[1] if center else "raw",
         "excerpt": excerpt,
-        "_ended_at": entry.session.ended_at,
     }
