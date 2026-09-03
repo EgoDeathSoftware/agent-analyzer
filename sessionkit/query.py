@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from pathlib import PurePath
 from typing import Any, Callable, Iterable
 
-from sessionkit import settingsjson as sj
+from sessionkit import pricing, settingsjson as sj
 from sessionkit.classify import ANOMALY_HINTS, signature
 from sessionkit.corpus import Corpus, Loaded
 from sessionkit.parse import ToolCall, block_text, read_line
@@ -782,3 +782,38 @@ def _agent_description(tool: ToolCall) -> str:
     if isinstance(parsed, dict):
         return str(parsed.get("description") or parsed.get("prompt") or tool.input_preview)
     return tool.input_preview
+
+
+# --- cost ------------------------------------------------------------------------------
+
+#: NOTES.md §2.1, borrowed from agent-retro and re-validated against this corpus in PLAN.md
+#: Phase 5: a tool averaging more than this per result is a candidate for offset/limit or an
+#: Explore agent instead of a full read; an agent dispatch costing more than this whose result
+#: was discarded is a wasted delegation.
+BLOAT_AVG_BYTES = 10 * 1024
+BLOAT_DISPATCH_USD = 1.0
+
+
+def tool_result_sizes(corpus: Corpus, scope: Filter) -> list[Row]:
+    """Per-tool result-size totals, backbone of ``--bloat``.
+
+    Reads ``ToolCall.out_bytes``, built from the tool_result block's own ``message.content``
+    text — never ``toolUseResult`` — so a spilled 94 KB result is counted at the ~2 KB stub
+    size context actually paid for, not the 45x-larger full text (PLAN.md §3.2.1). A call with
+    no result yet (``result_line == 0``) is excluded rather than counted as zero bytes.
+    """
+    buckets: dict[str, dict[str, Any]] = {}
+    for entry in scope.apply(corpus):
+        for tool in entry.session.tools:
+            if not tool.result_line:
+                continue
+            row = buckets.setdefault(tool.name, {"tool": tool.name, "n": 0, "total": 0, "max": 0})
+            row["n"] += 1
+            row["total"] += tool.out_bytes
+            row["max"] = max(row["max"], tool.out_bytes)
+    out = []
+    for row in buckets.values():
+        row["avg"] = row["total"] / row["n"] if row["n"] else 0.0
+        out.append(row)
+    out.sort(key=lambda r: -r["total"])
+    return out
