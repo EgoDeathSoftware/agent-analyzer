@@ -137,6 +137,24 @@ class BloatFindingsTest(CostQueryTestBase):
         self.assertEqual(rows[0]["reads"], 5)
         self.assertEqual(rows[0]["wasted_bytes"], 200)  # 4 re-reads x 50 bytes
 
+    def test_repeat_read_rows_ignores_a_co_located_tool_call_on_the_same_line(self) -> None:
+        """A Bash call sharing an assistant line with a Read must not contribute its bytes
+        to the read-loop's wasted_bytes (see final-review-report.md C1)."""
+        records = [fx.user("read a lot")]
+        for i in range(5):
+            records.append(fx.assistant([
+                fx.tool_use(f"r{i}", "Read", {"file_path": "/a.py"}),
+                fx.tool_use(f"b{i}", "Bash", {"command": "cat bigfile"}),
+            ], ts=f"2026-08-01T00:0{i}:00Z"))
+            records.append(fx.tool_result(f"r{i}", "x" * 50, ts=f"2026-08-01T00:0{i}:01Z"))
+            records.append(fx.tool_result(f"b{i}", "y" * 100_000, ts=f"2026-08-01T00:0{i}:02Z"))
+        fx.write(self.home, records, name="aaaa1111.jsonl")
+        corp = corpus.load()
+        rows = query.repeat_read_rows(corp, query.Filter())
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["reads"], 5)
+        self.assertEqual(rows[0]["wasted_bytes"], 200)  # 4 re-reads x 50 bytes, not Bash's 100000
+
     def test_cache_ratio_reports_none_when_nothing_written(self) -> None:
         fx.write(self.home, fx.simple_session(), name="aaaa1111.jsonl")
         corp = corpus.load()

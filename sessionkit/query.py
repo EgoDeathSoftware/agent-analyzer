@@ -905,9 +905,10 @@ def repeat_read_rows(corpus: Corpus, scope: Filter) -> list[Row]:
         loops = [a for a in entry.anomalies if a.kind == "read-loop"]
         if not loops:
             continue
-        bytes_by_line = {t.line: t.out_bytes for t in entry.session.tools}
         for a in loops:
-            sizes = [bytes_by_line.get(ln, 0) for ln in a.lines]
+            read_ids = {f.tool_use_id for f in entry.session.files
+                       if f.op == "read" and f.path == a.detail}
+            sizes = [t.out_bytes for t in entry.session.tools if t.tool_use_id in read_ids]
             out.append({"sid": entry.session.sid, "path": a.detail, "reads": a.count,
                        "wasted_bytes": sum(sizes[1:])})
     out.sort(key=lambda r: -r["wasted_bytes"])
