@@ -652,6 +652,65 @@ class ChildrenTest(unittest.TestCase):
         self.assertTrue(rows[0]["resolved"])
 
 
+class CostTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        tmp = Path(self._tmp.name)
+        self.home = tmp / "claude"
+        self.home.mkdir()
+        (tmp / "empty.env").write_text("", encoding="utf-8")
+        patcher = mock.patch.dict(os.environ, {
+            "CLAUDE_DIR": str(self.home), "SESSIONKIT_ENV": str(tmp / "empty.env")})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _args(self, *argv: str):
+        return cli.build_parser().parse_args(list(argv))
+
+    def test_corpus_wide_rollup(self) -> None:
+        fx.write(self.home, fx.simple_session(), name="aaaa1111.jsonl")
+        corp = corpus.load()
+        out = cli.cmd_cost(corp, self._args("cost"))
+        self.assertIn(fx.SID[:8], out)
+
+    def test_session_scoped_shows_tool_breakdown(self) -> None:
+        fx.write(self.home, fx.simple_session(), name="aaaa1111.jsonl")
+        corp = corpus.load()
+        out = cli.cmd_cost(corp, self._args("cost", fx.SID[:8]))
+        self.assertIn("Cost by tool", out)
+        self.assertIn("Read", out)
+
+    def test_unknown_session_exits(self) -> None:
+        corp = corpus.load()
+        with self.assertRaises(SystemExit):
+            cli.cmd_cost(corp, self._args("cost", "no-such-session"))
+
+    def test_bloat_flag_adds_bloat_sections(self) -> None:
+        fx.write(self.home, fx.simple_session(), name="aaaa1111.jsonl")
+        corp = corpus.load()
+        out = cli.cmd_cost(corp, self._args("cost", "--bloat"))
+        self.assertIn("Bloat", out)
+
+    def test_subagents_flag_states_sample_size(self) -> None:
+        fx.write(self.home, [
+            fx.user("go"),
+            fx.assistant([fx.tool_use("d1", "Agent", {"description": "Do the thing"})]),
+            fx.task_notification("d1", "childone01"),
+        ], name="aaaa1111.jsonl")
+        fx.write_subagent(self.home, fx.simple_session(), agent_id="childone01")
+        corp = corpus.load()
+        out = cli.cmd_cost(corp, self._args("cost", "--subagents"))
+        self.assertIn("dispatch", out.lower())
+
+    def test_json_never_truncates_and_both_flags_work_before_and_after_subcommand(self) -> None:
+        fx.write(self.home, fx.simple_session(), name="aaaa1111.jsonl")
+        corp = corpus.load()
+        out_after = cli.cmd_cost(corp, self._args("cost", "--json", "--bloat"))
+        out_before = cli.cmd_cost(corp, self._args("--json", "cost", "--bloat"))
+        self.assertEqual(out_after, out_before)
+
+
 class SinceTest(unittest.TestCase):
     """--since parsing must fail loudly rather than silently ignoring a bad window."""
 

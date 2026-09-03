@@ -288,6 +288,159 @@ def cmd_children(corpus: Corpus, args: argparse.Namespace) -> str:
     return report.render()
 
 
+def _cost_scope(args: argparse.Namespace) -> query.Filter:
+    """Like `_scope`, but `cost` overloads `--subagents` as its own comparison toggle (a bool,
+    not the shared include/exclude/only scope choice every other command uses), so this builds
+    the Filter directly instead of reading that flag — a real name collision, resolved locally
+    rather than by teaching `_scope` to type-sniff every command's `--subagents`."""
+    return query.Filter(
+        cutoff=since_cutoff(getattr(args, "since", None)),
+        project=getattr(args, "project", None) or "",
+        source=getattr(args, "source", None) or "",
+    )
+
+
+def cmd_cost(corpus: Corpus, args: argparse.Namespace) -> str:
+    """Token and dollar totals: corpus-wide, or narrowed to one session with --bloat/--subagents
+    detail (layer 2/3, PLAN.md §7 Phase 5)."""
+    scope = _cost_scope(args)
+    if args.sid:
+        return _cmd_cost_session(corpus, args, scope)
+    return _cmd_cost_corpus(corpus, args, scope)
+
+
+def _cmd_cost_corpus(corpus: Corpus, args: argparse.Namespace, scope: query.Filter) -> str:
+    """Fleet-wide cost rollup, one row per session."""
+    rows = scope.apply(corpus)
+    total = sum(e.session.cost_usd for e in rows)
+    report = Report(args.json, args.budget_kb or BUDGET_AGGREGATE_KB)
+    report.meta(sessions=len(rows), total_cost=human_cost(total))
+    report.section("Cost by session")
+    report.table(
+        ["sid", "project", "model", "cost", "tok_in", "tok_out"],
+        [[e.session.sid[:8], e.project_key, _short_model(e.session.model),
+          f"{e.session.cost_usd:.2f}", e.session.tok_in, e.session.tok_out]
+         for e in sorted(rows, key=lambda e: -e.session.cost_usd)],
+        key="sessions",
+    )
+    if args.bloat:
+        _cost_bloat_section(corpus, scope, report)
+    if args.subagents:
+        _cost_subagents_section(corpus, scope, report)
+    return report.render()
+
+
+def _cmd_cost_session(corpus: Corpus, args: argparse.Namespace, scope: query.Filter) -> str:
+    """One session's totals, tool breakdown, and the .claude.json cross-check."""
+    entry = query.find_session(corpus, args.sid)
+    if entry is None:
+        raise SystemExit(f"no session matching {args.sid!r} (try `sk index`)")
+    summary = query.session_cost_summary(entry)
+
+    report = Report(args.json, args.budget_kb or BUDGET_EXCERPT_KB)
+    report.meta(sid=entry.session.sid, project=entry.project_key, model=summary["model"],
+               cost=human_cost(summary["cost_usd"]))
+    report.section("Totals")
+    report.table(
+        ["metric", "value"],
+        [["total cost", human_cost(summary["cost_usd"])],
+         ["tool cost", human_cost(summary["tool_cost"])],
+         ["conversation cost", human_cost(summary["conversation_cost"])],
+         ["input tokens", summary["tok_in"]], ["output tokens", summary["tok_out"]],
+         ["cache read tokens", summary["tok_cache_read"]],
+         ["cache create tokens", summary["tok_cache_create"]]],
+        key="totals",
+    )
+    report.section("Cost by tool")
+    report.table(
+        ["tool", "calls", "cost"],
+        [[r["tool"], r["n"], f"{r['cost_usd']:.4f}"] for r in query.tool_cost_rows(entry)],
+        key="by_tool",
+    )
+    check = query.claude_json_cost_check(corpus, entry)
+    if check is not None:
+        report.text(f"~/.claude.json:lastModelUsage for this project's last session: "
+                    f"{human_cost(check['claude_json_cost'])} (sk: "
+                    f"{human_cost(check['sk_cost'])}, delta {check['delta']:+.4f}) — spot "
+                    "check only, covers the last session per project.")
+    if args.bloat:
+        _cost_bloat_section(Corpus(sessions=[entry]), query.Filter(), report)
+    if args.subagents:
+        _cost_subagents_table(query.children_rows(entry, corpus), report)
+    return report.render()
+
+
+def _cost_bloat_section(corpus: Corpus, scope: query.Filter, report: Report) -> None:
+    """Attach --bloat findings: oversized results, repeat reads, unbounded Bash output, and the
+    cache-read/create ratio (NOTES.md §2.1). Reused for both corpus- and session-scoped `sk
+    cost` — the caller passes a one-session Corpus for the latter."""
+    report.section("Bloat: oversized tool results (avg > 10 KB)")
+    report.table(
+        ["tool", "calls", "avg_bytes", "max_bytes", "total_bytes"],
+        [[r["tool"], r["n"], int(r["avg"]), r["max"], r["total"]]
+         for r in query.oversized_tool_rows(corpus, scope)],
+        key="oversized",
+    )
+    report.section("Bloat: repeat reads")
+    report.table(
+        ["sid", "path", "reads", "wasted_bytes"],
+        [[r["sid"][:8], r["path"], r["reads"], r["wasted_bytes"]]
+         for r in query.repeat_read_rows(corpus, scope)],
+        key="repeat_reads",
+    )
+    report.section("Bloat: unbounded Bash output (> 10 KB)")
+    report.table(
+        ["sid", "line", "bytes", "command"],
+        [[r["sid"][:8], r["line"], r["bytes"], r["input"]]
+         for r in query.unbounded_bash_rows(corpus, scope)],
+        key="unbounded_bash",
+    )
+    notices = query.truncation_notice_count(corpus, scope)
+    ratio = query.cache_ratio(corpus, scope)
+    report.section("Bloat: cache and truncation")
+    report.table(
+        ["metric", "value"],
+        [["read_truncation_notice count", notices],
+         ["cache_read tokens", ratio["cache_read"]],
+         ["cache_create tokens", ratio["cache_create"]],
+         ["read/create ratio", f"{ratio['ratio']:.2f}" if ratio["ratio"] is not None else "n/a"]],
+        key="cache",
+    )
+
+
+def _cost_subagents_section(corpus: Corpus, scope: query.Filter, report: Report) -> None:
+    """Attach --subagents fleet-wide dispatch rows, with sample size stated up front."""
+    summary = query.subagent_cost_summary(corpus, scope)
+    report.section("Subagents")
+    report.text(f"{summary['dispatches']} dispatch(es) in scope, {summary['resolved']} "
+               f"resolved ({summary['sunk']} sunk, {summary['wasted']} flagged wasted).")
+    if summary["resolved"] < 3:
+        report.text("Fewer than 3 resolved dispatches — too few to draw a conclusion from.")
+    report.table(
+        ["parent_sid", "child_sid", "agent_type", "state", "cost", "sunk", "wasted"],
+        [[r["parent_sid"][:8], r["child_sid"][:8] if r["child_sid"] else "-",
+          r["agent_type"] or "-", r["state"] or "-", f"{r['cost_usd']:.2f}",
+          "yes" if r["sunk"] else "no", "yes" if r["wasted"] else "no"]
+         for r in query.subagent_dispatch_rows(corpus, scope)],
+        key="dispatches",
+    )
+    report.text(f"Child cost total: {human_cost(summary['child_cost_total'])}; parent cost "
+               f"total: {human_cost(summary['parent_cost_total'])}.")
+
+
+def _cost_subagents_table(rows: list[query.Row], report: Report) -> None:
+    """This session's own dispatches, annotated sunk/wasted (session-scoped --subagents)."""
+    annotated = [query.annotate_dispatch(r) for r in rows]
+    report.section("Subagents (this session's dispatches)")
+    report.table(
+        ["child_sid", "agent_type", "state", "cost", "sunk", "wasted"],
+        [[r["child_sid"][:8] if r["child_sid"] else "-", r["agent_type"] or "-",
+          r["state"] or "-", f"{r['cost_usd']:.2f}", "yes" if r["sunk"] else "no",
+          "yes" if r["wasted"] else "no"] for r in annotated],
+        key="dispatches",
+    )
+
+
 def cmd_tail(corpus: Corpus, args: argparse.Namespace) -> str:
     """Layer 3: the last N turns of one session, plus its tail signal.
 
@@ -576,7 +729,20 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="sk", description=__doc__, parents=[common])
     sub = parser.add_subparsers(dest="command", required=True)
 
-    sub.add_parser("doctor", parents=[common],
+    # Every subparser below also carries these flags, so they parse after the subcommand too
+    # (`sk index --json`). Giving them `common` again there would work for that position but
+    # break the "before" position: argparse merges a subparser's own defaults into the top-level
+    # namespace after parsing, so an unset `--json` on the subparser (default False) would
+    # silently clobber a `--json` already set at the top level (`sk --json index`). SUPPRESS
+    # means "absent unless explicitly passed here", so the merge only ever overrides when the
+    # flag actually appears after the subcommand.
+    common_sub = argparse.ArgumentParser(add_help=False)
+    common_sub.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                            help="emit JSON instead of text")
+    common_sub.add_argument("--budget-kb", type=float, default=argparse.SUPPRESS,
+                            help="cap output size; excess rows are dropped with a notice")
+
+    sub.add_parser("doctor", parents=[common_sub],
                    help="source reachability and corpus totals")
 
     # Filter flags shared by every query command, so `--since`/`--project`/`--source` mean the
@@ -592,7 +758,7 @@ def build_parser() -> argparse.ArgumentParser:
         sub_parser.add_argument("--subagents", choices=["include", "exclude", "only"],
                                 default=default, help=f"subagent transcripts (default: {default})")
 
-    p_index = sub.add_parser("index", parents=[common, scoped],
+    p_index = sub.add_parser("index", parents=[common_sub, scoped],
                              help="one line per session (layer 1)")
     p_index.add_argument("--state", help="filter by end_state, e.g. interrupted-tool")
     p_index.add_argument("--label-contains",
@@ -600,7 +766,7 @@ def build_parser() -> argparse.ArgumentParser:
                               "(case-insensitive)")
     _subagents_arg(p_index, "exclude")
 
-    p_show = sub.add_parser("show", parents=[common],
+    p_show = sub.add_parser("show", parents=[common_sub],
                             help="excerpt one session (layer 3)")
     p_show.add_argument("sid", help="session id or unique prefix")
     p_show.add_argument("--mode", default="summary",
@@ -610,13 +776,13 @@ def build_parser() -> argparse.ArgumentParser:
                         help="re-read tool/message text from source for full fidelity, past "
                              "the in-memory preview cap (JSON never truncates a cell either way)")
 
-    p_err = sub.add_parser("errors", parents=[common, scoped],
+    p_err = sub.add_parser("errors", parents=[common_sub, scoped],
                            help="cluster tool failures fleet-wide (layer 2)")
     p_err.add_argument("--group-by", choices=["class", "tool", "signature", "session"],
                        default="class")
     _subagents_arg(p_err, "exclude")
 
-    p_cmd = sub.add_parser("commands", parents=[common, scoped],
+    p_cmd = sub.add_parser("commands", parents=[common_sub, scoped],
                            help="review every tool call: what actually ran")
     p_cmd.add_argument("--group-by", choices=["command", "tool", "session", "agent"],
                        default="command")
@@ -626,19 +792,38 @@ def build_parser() -> argparse.ArgumentParser:
     # Subagent visibility is the point of this command, unlike index/errors' fleet dashboards.
     _subagents_arg(p_cmd, "include")
 
-    p_hooks = sub.add_parser("hooks", parents=[common, scoped],
+    p_hooks = sub.add_parser("hooks", parents=[common_sub, scoped],
                              help="join hook-block/deny failures against settings.json")
     _subagents_arg(p_hooks, "exclude")
 
-    p_forensics = sub.add_parser("forensics", parents=[common],
+    p_forensics = sub.add_parser("forensics", parents=[common_sub],
                                  help="why one session went wrong (layer 3)")
     p_forensics.add_argument("sid", help="session id or unique prefix")
 
-    p_children = sub.add_parser("children", parents=[common],
+    p_children = sub.add_parser("children", parents=[common_sub],
                                  help="Agent dispatches from one session, resolved to child sid")
     p_children.add_argument("sid", help="session id or unique prefix")
 
-    p_tail = sub.add_parser("tail", parents=[common, scoped],
+    p_cost = sub.add_parser("cost", parents=[common_sub, scoped],
+                            help="token/dollar totals, fleet-wide or for one session "
+                                 "(layer 2/3)")
+    p_cost.add_argument("sid", nargs="?", default=None,
+                        help="session id or unique prefix; omit for a corpus-wide rollup")
+    p_cost.add_argument("--bloat", action="store_true",
+                        help="oversized results, repeat reads, unbounded Bash output, "
+                             "cache ratio")
+    p_cost.add_argument("--subagents", action="store_true",
+                        help="compare subagent dispatch cost against the parent, flagging "
+                             "sunk and wasted dispatches")
+    # Note deliberately no `_subagents_arg(p_cost, ...)` call: `cost`'s own `--subagents` is
+    # the comparison toggle from PLAN.md §7 Phase 5, not the shared include/exclude/only scope
+    # flag every other command uses — the two can't coexist as the same flag name. This is
+    # exactly why `cmd_cost` uses the local `_cost_scope` helper above instead of the shared
+    # `_scope`: `_scope` reads `getattr(args, "subagents", "include")` as a scope choice, which
+    # would misread `cost`'s boolean flag. `_scope` itself is untouched — every other command
+    # keeps working exactly as before.
+
+    p_tail = sub.add_parser("tail", parents=[common_sub, scoped],
                             help="last N turns of one session, with a tail signal")
     group = p_tail.add_mutually_exclusive_group(required=True)
     group.add_argument("sid", nargs="?", default=None,
@@ -653,7 +838,7 @@ def build_parser() -> argparse.ArgumentParser:
                              "(JSON never truncates a cell either way)")
     _subagents_arg(p_tail, "include")
 
-    p_files = sub.add_parser("files", parents=[common, scoped],
+    p_files = sub.add_parser("files", parents=[common_sub, scoped],
                              help="files a session (or scope) touched")
     p_files.add_argument("sid", nargs="?", default=None,
                          help="session id or unique prefix; omit for a project rollup")
@@ -661,7 +846,7 @@ def build_parser() -> argparse.ArgumentParser:
                          help="intersect with `git status --porcelain` in the session's cwd")
     _subagents_arg(p_files, "include")
 
-    p_search = sub.add_parser("search", parents=[common, scoped],
+    p_search = sub.add_parser("search", parents=[common_sub, scoped],
                               help="full-text search across every transcript (layer 2)")
     p_search.add_argument("query", help="text to search for (or a pattern with --regex)")
     p_search.add_argument("--regex", action="store_true",
@@ -685,7 +870,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 COMMANDS = {"doctor": cmd_doctor, "index": cmd_index, "show": cmd_show, "errors": cmd_errors,
              "commands": cmd_commands, "hooks": cmd_hooks, "forensics": cmd_forensics,
-             "children": cmd_children, "tail": cmd_tail, "files": cmd_files,
+             "children": cmd_children, "cost": cmd_cost, "tail": cmd_tail, "files": cmd_files,
              "search": cmd_search}
 
 
