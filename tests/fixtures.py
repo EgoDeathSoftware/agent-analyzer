@@ -53,6 +53,12 @@ def system(subtype: str, ts: str = "2026-08-01T00:00:03Z", **extra: Any) -> dict
             "uuid": f"s-{subtype}-{ts}", "subtype": subtype, **extra}
 
 
+def attachment(atype: str, ts: str = "2026-08-01T00:00:03Z", **extra: Any) -> dict[str, Any]:
+    """A ``type: attachment`` record, e.g. ``read_truncation_notice``."""
+    return {"type": "attachment", "sessionId": SID, "cwd": CWD, "timestamp": ts,
+            "uuid": f"att-{atype}-{ts}", "attachment": {"type": atype, **extra}}
+
+
 def write(tmp: Path, records: list[dict[str, Any]], name: str = f"{SID}.jsonl") -> Path:
     """Write records as JSONL into a project directory and return the file path."""
     project = tmp / "projects" / "-home-dev-myproject"

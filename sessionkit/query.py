@@ -860,3 +860,64 @@ def session_cost_summary(entry: Loaded) -> Row:
         "tok_cache_read": s.tok_cache_read, "tok_cache_create": s.tok_cache_create,
         "model": s.model,
     }
+
+
+def oversized_tool_rows(corpus: Corpus, scope: Filter) -> list[Row]:
+    """Tools whose average result exceeds :data:`BLOAT_AVG_BYTES` — candidates for
+    offset/limit or an Explore agent instead of a full read (NOTES.md §2.1)."""
+    return [r for r in tool_result_sizes(corpus, scope) if r["avg"] > BLOAT_AVG_BYTES]
+
+
+def truncation_notice_count(corpus: Corpus, scope: Filter) -> int:
+    """How many ``read_truncation_notice`` attachments occurred in scope — each is a read
+    whose model only saw part of a file."""
+    return sum(1 for e in scope.apply(corpus) for a in e.session.attach
+               if a.atype == "read_truncation_notice")
+
+
+def unbounded_bash_rows(corpus: Corpus, scope: Filter) -> list[Row]:
+    """``Bash`` calls whose result exceeded :data:`BLOAT_AVG_BYTES`.
+
+    Unlike ``Read``, ``Bash`` has no offset/limit to bound its output, so a large result here
+    means an unpiped command rather than a tool-input mistake — the fix is ``| head`` at the
+    command, not a smaller read window.
+    """
+    out = []
+    for entry in scope.apply(corpus):
+        for tool in entry.session.tools:
+            if tool.name == "Bash" and tool.out_bytes > BLOAT_AVG_BYTES:
+                out.append({"sid": entry.session.sid, "line": tool.line,
+                           "bytes": tool.out_bytes, "input": tool.input_preview})
+    out.sort(key=lambda r: -r["bytes"])
+    return out
+
+
+def repeat_read_rows(corpus: Corpus, scope: Filter) -> list[Row]:
+    """Sessions with a ``read-loop`` anomaly, plus bytes re-read beyond the first read of that
+    path.
+
+    A byte count, not a dollar figure: a re-read result stays in context and is paid for again
+    across every later turn's input/cache tokens, which cannot be isolated from the rest of the
+    conversation's cost. This is a proxy, stated as one.
+    """
+    out = []
+    for entry in scope.apply(corpus):
+        loops = [a for a in entry.anomalies if a.kind == "read-loop"]
+        if not loops:
+            continue
+        bytes_by_line = {t.line: t.out_bytes for t in entry.session.tools}
+        for a in loops:
+            sizes = [bytes_by_line.get(ln, 0) for ln in a.lines]
+            out.append({"sid": entry.session.sid, "path": a.detail, "reads": a.count,
+                       "wasted_bytes": sum(sizes[1:])})
+    out.sort(key=lambda r: -r["wasted_bytes"])
+    return out
+
+
+def cache_ratio(corpus: Corpus, scope: Filter) -> Row:
+    """Cache-read vs cache-create tokens across scope — a low ratio means the cache is being
+    written more than reused (NOTES.md §2.1)."""
+    read = sum(e.session.tok_cache_read for e in scope.apply(corpus))
+    create = sum(e.session.tok_cache_create for e in scope.apply(corpus))
+    return {"cache_read": read, "cache_create": create,
+            "ratio": read / create if create else None}

@@ -84,5 +84,65 @@ class ToolCostRowsTest(CostQueryTestBase):
         self.assertAlmostEqual(summary["cost_usd"], entry.session.cost_usd)
 
 
+class BloatFindingsTest(CostQueryTestBase):
+    def test_oversized_tool_rows_flags_average_above_threshold(self) -> None:
+        fx.write(self.home, [
+            fx.user("read"),
+            fx.assistant([fx.tool_use("t1", "Read", {"file_path": "/a.py"})]),
+            fx.tool_result("t1", "x" * (query.BLOAT_AVG_BYTES + 1)),
+        ], name="aaaa1111.jsonl")
+        corp = corpus.load()
+        rows = query.oversized_tool_rows(corp, query.Filter())
+        self.assertEqual([r["tool"] for r in rows], ["Read"])
+
+    def test_oversized_tool_rows_excludes_small_results(self) -> None:
+        fx.write(self.home, fx.simple_session(), name="aaaa1111.jsonl")
+        corp = corpus.load()
+        self.assertEqual(query.oversized_tool_rows(corp, query.Filter()), [])
+
+    def test_truncation_notice_count(self) -> None:
+        fx.write(self.home, [
+            fx.user("read"),
+            fx.attachment("read_truncation_notice"),
+            fx.attachment("read_truncation_notice", ts="2026-08-01T00:00:04Z"),
+            fx.attachment("hook_success", ts="2026-08-01T00:00:05Z"),
+        ], name="aaaa1111.jsonl")
+        corp = corpus.load()
+        self.assertEqual(query.truncation_notice_count(corp, query.Filter()), 2)
+
+    def test_unbounded_bash_rows_flags_large_bash_output_only(self) -> None:
+        fx.write(self.home, [
+            fx.user("run"),
+            fx.assistant([fx.tool_use("t1", "Bash", {"command": "cat bigfile"})]),
+            fx.tool_result("t1", "x" * (query.BLOAT_AVG_BYTES + 1)),
+            fx.assistant([fx.tool_use("t2", "Read", {"file_path": "/a.py"})],
+                        ts="2026-08-01T00:00:04Z"),
+            fx.tool_result("t2", "y" * (query.BLOAT_AVG_BYTES + 1), ts="2026-08-01T00:00:05Z"),
+        ], name="aaaa1111.jsonl")
+        corp = corpus.load()
+        rows = query.unbounded_bash_rows(corp, query.Filter())
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["bytes"], query.BLOAT_AVG_BYTES + 1)
+
+    def test_repeat_read_rows_sums_bytes_after_the_first_read(self) -> None:
+        records = [fx.user("read a lot")]
+        for i in range(5):
+            records.append(fx.assistant([fx.tool_use(f"t{i}", "Read", {"file_path": "/a.py"})],
+                                        ts=f"2026-08-01T00:0{i}:00Z"))
+            records.append(fx.tool_result(f"t{i}", "x" * 50, ts=f"2026-08-01T00:0{i}:01Z"))
+        fx.write(self.home, records, name="aaaa1111.jsonl")
+        corp = corpus.load()
+        rows = query.repeat_read_rows(corp, query.Filter())
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["reads"], 5)
+        self.assertEqual(rows[0]["wasted_bytes"], 200)  # 4 re-reads x 50 bytes
+
+    def test_cache_ratio_reports_none_when_nothing_written(self) -> None:
+        fx.write(self.home, fx.simple_session(), name="aaaa1111.jsonl")
+        corp = corpus.load()
+        ratio = query.cache_ratio(corp, query.Filter())
+        self.assertIsNone(ratio["ratio"])
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
