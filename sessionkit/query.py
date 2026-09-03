@@ -817,3 +817,46 @@ def tool_result_sizes(corpus: Corpus, scope: Filter) -> list[Row]:
         out.append(row)
     out.sort(key=lambda r: -r["total"])
     return out
+
+
+def tool_cost_rows(entry: Loaded) -> list[Row]:
+    """Per-tool cost breakdown for one session.
+
+    Splits each assistant message's cost evenly across the ``tool_use`` blocks it carries —
+    the same attribution the tracker UI's Costs tab uses (``parser.ts:buildCostBreakdown``), so
+    the two must agree to the cent (SPEC.md §4.1). ``ToolCall.line`` equals the owning
+    assistant ``Message.line``, which is what makes grouping by line the same grouping.
+    """
+    msg_cost_by_line = {
+        m.line: pricing.cost(m.model, m.tok_in, m.tok_out, m.tok_cr, m.tok_cc)
+        for m in entry.session.messages if m.role == "assistant"
+    }
+    tools_by_line: dict[int, list[ToolCall]] = {}
+    for tool in entry.session.tools:
+        tools_by_line.setdefault(tool.line, []).append(tool)
+
+    buckets: dict[str, dict[str, Any]] = {}
+    for line, tools in tools_by_line.items():
+        share = msg_cost_by_line.get(line, 0.0) / len(tools)
+        for tool in tools:
+            row = buckets.setdefault(tool.name, {"tool": tool.name, "n": 0, "cost_usd": 0.0})
+            row["n"] += 1
+            row["cost_usd"] += share
+    out = list(buckets.values())
+    out.sort(key=lambda r: -r["cost_usd"])
+    return out
+
+
+def session_cost_summary(entry: Loaded) -> Row:
+    """Token and dollar totals for one session, split into tool vs conversation cost the same
+    way the tracker's Costs tab does: ``conversation_cost = total - sum(tool costs)``.
+    """
+    s = entry.session
+    tool_cost = sum(r["cost_usd"] for r in tool_cost_rows(entry))
+    return {
+        "cost_usd": s.cost_usd, "tool_cost": tool_cost,
+        "conversation_cost": s.cost_usd - tool_cost,
+        "tok_in": s.tok_in, "tok_out": s.tok_out,
+        "tok_cache_read": s.tok_cache_read, "tok_cache_create": s.tok_cache_create,
+        "model": s.model,
+    }

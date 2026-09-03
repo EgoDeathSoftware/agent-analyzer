@@ -56,5 +56,33 @@ class ToolResultSizesTest(CostQueryTestBase):
         self.assertEqual(rows, [])
 
 
+class ToolCostRowsTest(CostQueryTestBase):
+    def test_splits_message_cost_evenly_across_tool_use_blocks_on_same_line(self) -> None:
+        # One assistant turn dispatching two tools at once — same shape parser.ts splits.
+        fx.write(self.home, [
+            fx.user("go"),
+            fx.assistant([
+                fx.tool_use("t1", "Read", {"file_path": "/a.py"}),
+                fx.tool_use("t2", "Bash", {"command": "ls"}),
+            ], usage={"input_tokens": 1_000_000, "output_tokens": 0}, model="claude-opus-5"),
+            fx.tool_result("t1", "a"), fx.tool_result("t2", "b"),
+        ], name="aaaa1111.jsonl")
+        corp = corpus.load()
+        entry = corp.sessions[0]
+        rows = {r["tool"]: r for r in query.tool_cost_rows(entry)}
+        # 1e6 input tokens @ $5/M = $5.00, split evenly across 2 tool_use blocks -> $2.50 each.
+        self.assertAlmostEqual(rows["Read"]["cost_usd"], 2.50)
+        self.assertAlmostEqual(rows["Bash"]["cost_usd"], 2.50)
+
+    def test_session_cost_summary_tool_plus_conversation_equals_total(self) -> None:
+        fx.write(self.home, fx.simple_session(), name="aaaa1111.jsonl")
+        corp = corpus.load()
+        entry = corp.sessions[0]
+        summary = query.session_cost_summary(entry)
+        self.assertAlmostEqual(summary["tool_cost"] + summary["conversation_cost"],
+                               summary["cost_usd"])
+        self.assertAlmostEqual(summary["cost_usd"], entry.session.cost_usd)
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
