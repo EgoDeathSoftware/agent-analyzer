@@ -416,6 +416,32 @@ class SearchScan(unittest.TestCase):
         self.assertEqual(len(rows), 2)
         self.assertEqual(total, 3)
 
+    def test_search_rows_total_counts_before_per_session_cap(self) -> None:
+        import tempfile
+        from pathlib import Path
+        from tests import fixtures as fx
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            fx.write(home, [fx.user(f"banana #{i}", ts=f"2026-08-01T00:0{i}:00Z")
+                            for i in range(4)])
+            pattern = search.compile_query("banana", regex=False, case_sensitive=False)
+            rows, _, total = search.search_rows([self._source(home)], self._empty_scope(),
+                                                 pattern, per_session=1)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(total, 4)
+
+    def test_search_rows_excerpt_bounds_a_greedy_regex_match_span(self) -> None:
+        import tempfile
+        from pathlib import Path
+        from tests import fixtures as fx
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            huge = "Error: " + ("z" * 20000)  # a greedy `.*` match spans the whole tail
+            fx.write(home, [fx.user(huge)])
+            pattern = search.compile_query(r"Error.*", regex=True, case_sensitive=False)
+            rows, _, _ = search.search_rows([self._source(home)], self._empty_scope(), pattern)
+        self.assertLess(len(rows[0]["excerpt"]), 1000)
+
 
 class SearchCli(unittest.TestCase):
     def setUp(self) -> None:
@@ -508,6 +534,20 @@ class SearchCli(unittest.TestCase):
         self.assertEqual(payload["hits"], 1)
         self.assertEqual(len(payload["matches"]), 1)  # not silently dropped by the budget
         self.assertIn("needle-in-huge-output", payload["matches"][0]["excerpt"])
+        self.assertLess(len(out), 4200)
+
+    def test_search_cli_json_stays_within_budget_for_a_greedy_regex_match(self) -> None:
+        # A literal query's match span is bounded by the query text itself; --regex with a
+        # greedy quantifier is not, and could re-open the same budget overflow the previous
+        # test closed if the excerpt window were clamped relative to match.end() instead of
+        # match.start().
+        from tests import fixtures as fx
+        huge = "Error: " + ("z" * 20000)
+        fx.write(self.home, [fx.user(huge)])
+        out = self._run("search", r"Error.*", "--regex", "--json")
+        payload = json.loads(out)
+        self.assertEqual(payload["hits"], 1)
+        self.assertEqual(len(payload["matches"]), 1)
         self.assertLess(len(out), 4200)
 
     def test_search_cli_reports_when_limit_hides_matches(self) -> None:

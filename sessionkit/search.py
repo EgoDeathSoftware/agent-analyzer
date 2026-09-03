@@ -215,8 +215,8 @@ def search_rows(sources: list[Source], scope: query.Filter, pattern: re.Pattern[
 
     candidates.sort(key=lambda pair: (pair[0].session.ended_at or "", pair[1].line_no),
                     reverse=True)
+    total = len(candidates)
     capped = _cap_per_session(candidates, per_session) if per_session else candidates
-    total = len(capped)
     survivors = capped[:limit] if limit else capped
     rows = [_build_row(entry, hit, context, pattern) for entry, hit in survivors]
     return rows, degraded, total
@@ -320,7 +320,10 @@ def _bounded_text(text: str, pattern: re.Pattern[str]) -> str:
     if match is None:
         return text if len(text) <= _EXCERPT_WINDOW else text[:_EXCERPT_WINDOW] + "…"
     lo = max(0, match.start() - _EXCERPT_WINDOW)
-    hi = min(len(text), match.end() + _EXCERPT_WINDOW)
+    # Bound relative to match.start(), not match.end(): a greedy regex (e.g. `Error.*`) can
+    # match an arbitrarily long span, and clamping only the window's start would leave
+    # hi - lo unbounded, reopening the same budget-overflow this function exists to prevent.
+    hi = min(len(text), match.start() + _EXCERPT_WINDOW)
     prefix = "…" if lo > 0 else ""
     suffix = "…" if hi < len(text) else ""
     return prefix + text[lo:hi] + suffix
