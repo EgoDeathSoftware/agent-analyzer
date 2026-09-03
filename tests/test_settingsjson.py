@@ -86,6 +86,26 @@ class SettingsTest(unittest.TestCase):
     def test_read_allowed_tools_missing_file(self) -> None:
         self.assertEqual(sj.read_allowed_tools(self.root / "nope.json", "/x"), [])
 
+    def test_read_last_model_usage(self) -> None:
+        claude_json = self.root / ".claude.json"
+        claude_json.write_text(json.dumps({"projects": {"/home/dev/myproject": {
+            "lastSessionId": "abc123",
+            "lastModelUsage": {"claude-opus-5": {"inputTokens": 10, "costUSD": 1.23}},
+        }}}), encoding="utf-8")
+        usage = sj.read_last_model_usage(claude_json, "/home/dev/myproject")
+        self.assertEqual(usage["claude-opus-5"]["costUSD"], 1.23)
+        self.assertEqual(sj.read_last_session_id(claude_json, "/home/dev/myproject"), "abc123")
+
+    def test_read_last_model_usage_missing_project(self) -> None:
+        claude_json = self.root / ".claude.json"
+        claude_json.write_text(json.dumps({"projects": {}}), encoding="utf-8")
+        self.assertEqual(sj.read_last_model_usage(claude_json, "/nowhere"), {})
+        self.assertEqual(sj.read_last_session_id(claude_json, "/nowhere"), "")
+
+    def test_read_last_model_usage_missing_file(self) -> None:
+        self.assertEqual(sj.read_last_model_usage(self.root / "nope.json", "/x"), {})
+        self.assertEqual(sj.read_last_session_id(self.root / "nope.json", "/x"), "")
+
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

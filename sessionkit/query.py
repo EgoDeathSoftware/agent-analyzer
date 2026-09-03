@@ -16,10 +16,10 @@ import json
 import os
 import subprocess
 from dataclasses import dataclass
-from pathlib import PurePath
+from pathlib import Path, PurePath
 from typing import Any, Callable, Iterable
 
-from sessionkit import settingsjson as sj
+from sessionkit import pricing, settingsjson as sj
 from sessionkit.classify import ANOMALY_HINTS, signature
 from sessionkit.corpus import Corpus, Loaded
 from sessionkit.parse import ToolCall, block_text, read_line
@@ -782,3 +782,215 @@ def _agent_description(tool: ToolCall) -> str:
     if isinstance(parsed, dict):
         return str(parsed.get("description") or parsed.get("prompt") or tool.input_preview)
     return tool.input_preview
+
+
+# --- cost ------------------------------------------------------------------------------
+
+#: NOTES.md §2.1, borrowed from agent-retro and re-validated against this corpus in PLAN.md
+#: Phase 5: a tool averaging more than this per result is a candidate for offset/limit or an
+#: Explore agent instead of a full read; an agent dispatch costing more than this whose result
+#: was discarded is a wasted delegation.
+BLOAT_AVG_BYTES = 10 * 1024
+BLOAT_DISPATCH_USD = 1.0
+
+
+def tool_result_sizes(corpus: Corpus, scope: Filter) -> list[Row]:
+    """Per-tool result-size totals, backbone of ``--bloat``.
+
+    Reads ``ToolCall.out_bytes``, built from the tool_result block's own ``message.content``
+    text — never ``toolUseResult`` — so a spilled 94 KB result is counted at the ~2 KB stub
+    size context actually paid for, not the 45x-larger full text (PLAN.md §3.2.1). A call with
+    no result yet (``result_line == 0``) is excluded rather than counted as zero bytes.
+    """
+    buckets: dict[str, dict[str, Any]] = {}
+    for entry in scope.apply(corpus):
+        for tool in entry.session.tools:
+            if not tool.result_line:
+                continue
+            row = buckets.setdefault(tool.name, {"tool": tool.name, "n": 0, "total": 0, "max": 0})
+            row["n"] += 1
+            row["total"] += tool.out_bytes
+            row["max"] = max(row["max"], tool.out_bytes)
+    out = []
+    for row in buckets.values():
+        row["avg"] = row["total"] / row["n"] if row["n"] else 0.0
+        out.append(row)
+    out.sort(key=lambda r: -r["total"])
+    return out
+
+
+def tool_cost_rows(entry: Loaded) -> list[Row]:
+    """Per-tool cost breakdown for one session.
+
+    Splits each assistant message's cost evenly across the ``tool_use`` blocks it carries —
+    the same attribution the tracker UI's Costs tab uses (``parser.ts:buildCostBreakdown``), so
+    the two must agree to the cent (SPEC.md §4.1). ``ToolCall.line`` equals the owning
+    assistant ``Message.line``, which is what makes grouping by line the same grouping.
+    """
+    msg_cost_by_line = {
+        m.line: pricing.cost(m.model, m.tok_in, m.tok_out, m.tok_cr, m.tok_cc)
+        for m in entry.session.messages if m.role == "assistant"
+    }
+    tools_by_line: dict[int, list[ToolCall]] = {}
+    for tool in entry.session.tools:
+        tools_by_line.setdefault(tool.line, []).append(tool)
+
+    buckets: dict[str, dict[str, Any]] = {}
+    for line, tools in tools_by_line.items():
+        share = msg_cost_by_line.get(line, 0.0) / len(tools)
+        for tool in tools:
+            row = buckets.setdefault(tool.name, {"tool": tool.name, "n": 0, "cost_usd": 0.0})
+            row["n"] += 1
+            row["cost_usd"] += share
+    out = list(buckets.values())
+    out.sort(key=lambda r: -r["cost_usd"])
+    return out
+
+
+def session_cost_summary(entry: Loaded) -> Row:
+    """Token and dollar totals for one session, split into tool vs conversation cost the same
+    way the tracker's Costs tab does: ``conversation_cost = total - sum(tool costs)``.
+    """
+    s = entry.session
+    tool_cost = sum(r["cost_usd"] for r in tool_cost_rows(entry))
+    return {
+        "cost_usd": s.cost_usd, "tool_cost": tool_cost,
+        "conversation_cost": s.cost_usd - tool_cost,
+        "tok_in": s.tok_in, "tok_out": s.tok_out,
+        "tok_cache_read": s.tok_cache_read, "tok_cache_create": s.tok_cache_create,
+        "model": s.model,
+    }
+
+
+def oversized_tool_rows(corpus: Corpus, scope: Filter) -> list[Row]:
+    """Tools whose average result exceeds :data:`BLOAT_AVG_BYTES` — candidates for
+    offset/limit or an Explore agent instead of a full read (NOTES.md §2.1)."""
+    return [r for r in tool_result_sizes(corpus, scope) if r["avg"] > BLOAT_AVG_BYTES]
+
+
+def truncation_notice_count(corpus: Corpus, scope: Filter) -> int:
+    """How many ``read_truncation_notice`` attachments occurred in scope — each is a read
+    whose model only saw part of a file."""
+    return sum(1 for e in scope.apply(corpus) for a in e.session.attach
+               if a.atype == "read_truncation_notice")
+
+
+def unbounded_bash_rows(corpus: Corpus, scope: Filter) -> list[Row]:
+    """``Bash`` calls whose result exceeded :data:`BLOAT_AVG_BYTES`.
+
+    Unlike ``Read``, ``Bash`` has no offset/limit to bound its output, so a large result here
+    means an unpiped command rather than a tool-input mistake — the fix is ``| head`` at the
+    command, not a smaller read window.
+    """
+    out = []
+    for entry in scope.apply(corpus):
+        for tool in entry.session.tools:
+            if tool.name == "Bash" and tool.out_bytes > BLOAT_AVG_BYTES:
+                out.append({"sid": entry.session.sid, "line": tool.line,
+                           "bytes": tool.out_bytes, "input": tool.input_preview})
+    out.sort(key=lambda r: -r["bytes"])
+    return out
+
+
+def repeat_read_rows(corpus: Corpus, scope: Filter) -> list[Row]:
+    """Sessions with a ``read-loop`` anomaly, plus bytes re-read beyond the first read of that
+    path.
+
+    A byte count, not a dollar figure: a re-read result stays in context and is paid for again
+    across every later turn's input/cache tokens, which cannot be isolated from the rest of the
+    conversation's cost. This is a proxy, stated as one.
+    """
+    out = []
+    for entry in scope.apply(corpus):
+        loops = [a for a in entry.anomalies if a.kind == "read-loop"]
+        if not loops:
+            continue
+        for a in loops:
+            read_ids = {f.tool_use_id for f in entry.session.files
+                       if f.op == "read" and f.path == a.detail}
+            sizes = [t.out_bytes for t in entry.session.tools if t.tool_use_id in read_ids]
+            out.append({"sid": entry.session.sid, "path": a.detail, "reads": a.count,
+                       "wasted_bytes": sum(sizes[1:])})
+    out.sort(key=lambda r: -r["wasted_bytes"])
+    return out
+
+
+def cache_ratio(corpus: Corpus, scope: Filter) -> Row:
+    """Cache-read vs cache-create tokens across scope — a low ratio means the cache is being
+    written more than reused (NOTES.md §2.1)."""
+    read = sum(e.session.tok_cache_read for e in scope.apply(corpus))
+    create = sum(e.session.tok_cache_create for e in scope.apply(corpus))
+    return {"cache_read": read, "cache_create": create,
+            "ratio": read / create if create else None}
+
+
+def annotate_dispatch(row: Row) -> Row:
+    """Add ``sunk``/``wasted`` flags to one ``children_rows``-shaped row.
+
+    ``sunk``: the child was resolved but never reached ``complete`` — real spend with no
+    surviving output, reported as its own line rather than folded into the parent's total
+    (PLAN.md §7 Phase 5). ``wasted``: sunk *and* costing more than :data:`BLOAT_DISPATCH_USD` —
+    the deterministic half of the "was it discarded" test; see :func:`subagent_dispatch_rows`
+    for why the other half is out of scope here.
+    """
+    sunk = bool(row["resolved"]) and row["state"] not in ("complete", "")
+    wasted = sunk and row["cost_usd"] > BLOAT_DISPATCH_USD
+    return {**row, "sunk": sunk, "wasted": wasted}
+
+
+def subagent_dispatch_rows(corpus: Corpus, scope: Filter) -> list[Row]:
+    """Every ``Agent`` dispatch across scope, resolved and annotated — the fleet-wide
+    counterpart to :func:`children_rows`, which this reuses per parent session."""
+    out = []
+    for parent in [e for e in scope.apply(corpus) if not e.session.is_subagent]:
+        for row in children_rows(parent, corpus):
+            out.append({**annotate_dispatch(row), "parent_sid": parent.session.sid})
+    out.sort(key=lambda r: -r["cost_usd"])
+    return out
+
+
+def subagent_cost_summary(corpus: Corpus, scope: Filter) -> Row:
+    """Aggregate subagent-vs-parent cost comparison over scope. States its own sample size so
+    a thin result isn't read as a conclusion (PLAN.md §7 Phase 5)."""
+    rows = subagent_dispatch_rows(corpus, scope)
+    resolved = [r for r in rows if r["resolved"]]
+    parent_total = sum(e.session.cost_usd for e in scope.apply(corpus)
+                       if not e.session.is_subagent)
+    return {
+        "dispatches": len(rows), "resolved": len(resolved),
+        "sunk": sum(1 for r in resolved if r["sunk"]),
+        "wasted": sum(1 for r in resolved if r["wasted"]),
+        "child_cost_total": sum(r["cost_usd"] for r in resolved),
+        "parent_cost_total": parent_total,
+    }
+
+
+def _claude_json_paths(corpus: Corpus) -> list[Path]:
+    """Every reachable single-layout claude-code source's sibling ``.claude.json``,
+    deduplicated. ``.claude.json`` lives next to ``~/.claude``, not inside it."""
+    seen: set[Path] = set()
+    for source in corpus.sources:
+        if source.reachable and source.kind == "claude-code" and source.layout == "single":
+            seen.add(source.root.parent / ".claude.json")
+    return sorted(seen)
+
+
+def claude_json_cost_check(corpus: Corpus, entry: Loaded) -> Row | None:
+    """Cross-check one session's computed cost against Claude Code's own
+    ``lastModelUsage`` figure (PLAN.md §3.2.2) — an independent third source, computed by
+    Claude Code itself rather than either hand-maintained pricing table. Returns ``None`` when
+    this session is not its project's *last* session (the only one ``lastModelUsage`` covers)
+    or no ``.claude.json`` could be read for its cwd.
+    """
+    for path in _claude_json_paths(corpus):
+        if not path.is_file():
+            continue
+        if sj.read_last_session_id(path, entry.session.cwd) != entry.session.sid:
+            continue
+        usage = sj.read_last_model_usage(path, entry.session.cwd)
+        if not usage:
+            continue
+        claude_json_cost = sum(float(m.get("costUSD") or 0.0) for m in usage.values())
+        return {"claude_json_cost": claude_json_cost, "sk_cost": entry.session.cost_usd,
+               "delta": entry.session.cost_usd - claude_json_cost}
+    return None

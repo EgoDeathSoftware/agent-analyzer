@@ -1,10 +1,11 @@
 """Model pricing and per-message cost computation.
 
-Rates are USD per token, current as of 2026-08-26. This deliberately does **not** reuse
-``server/src/pricing.ts``: that table predates the Claude 5 family, so every ``claude-sonnet-5``
-session in the corpus falls through to its Sonnet-4 default, and its Opus row still carries
-Opus-4.5-era rates ($15/$75). Costs here are list-price estimates — Claude Code usage is billed
-by subscription, so treat the numbers as relative weight, not an invoice.
+Rates are USD per token, current as of 2026-08-26. The sibling ``claude-project-tracker`` repo's
+``server/src/pricing.ts`` mirrors this table so the UI and the CLI report the same figure for the
+same session — the two must be edited in lockstep, and ``tests/test_pricing.py:TrackerParityTest``
+is what pins them; update both files together whenever a rate changes. Costs here are list-price
+estimates — Claude Code usage is billed by subscription, so treat the numbers as relative weight,
+not an invoice.
 
 Cache multipliers follow the documented ratios: a 5-minute cache write costs 1.25x base input,
 a cache read 0.1x.

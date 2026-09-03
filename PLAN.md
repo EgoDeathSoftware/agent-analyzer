@@ -2,7 +2,9 @@
 
 **Status:** Phase 0 (scaffolding), Phase 1 (`error-patterns`) and Phase 2 (`sk commands`, `sk
 hooks`, `sk forensics`, `session-forensics`) complete and verified against the live corpus. Phase 3
-(`sk tail`, `sk files`, `unfinished-work`) complete. Phases 4–8 planned. Last updated 2026-08-28.
+(`sk tail`, `sk files`, `unfinished-work`) and Phase 4 (`sk search`) complete. Phase 5 (`sk
+cost`) complete; skill `cost-forensics` still planned. Phases 6–8 planned. Last updated
+2026-09-03.
 
 This document answers **what is being built and what's next**. Why it is built this way is
 `SPEC.md`; what we learned along the way is `NOTES.md`. See `SPEC.md` §6 for the ownership rule —
@@ -695,6 +697,33 @@ paid for 2 KB" is itself the signal that spilling worked.
   tokens plus `costUSD`, which makes it the only independent arbiter available. It covers the last
   session per project only, so this is a spot check on one session, not a corpus-wide assertion —
   state that scope in the test name so a green run is not read as more than it is.
+
+**Acceptance met**, with the same kind of scope note Phase 2 and Phase 4 recorded:
+
+- `--subagents`' "was the result used or discarded" question splits in two. The deterministic
+  half — a resolved child that never reached `complete` is sunk cost — is implemented and
+  tested. The judgment half — was a *completed* child's summary actually read by the parent's
+  later turns — needs exactly the kind of reasoning PLAN.md §2 assigns to a skill, not the CLI,
+  and is left to `cost-forensics` when that skill is written.
+- The tracker parity requirement (SPEC.md §4.1) is enforced by a test that transcribes
+  `server/src/pricing.ts`'s rate table into `tests/test_pricing.py` rather than by executing
+  TypeScript from this repo — it catches a rate changed on one side and not the other only when
+  someone remembers this test exists, which is stated in the test's own docstring.
+- `.claude.json:lastModelUsage` cross-checks only a session that is its project's *most recent*
+  one, per §3.2.2's own limit; `sk cost <sid>` reports the comparison when it applies and says
+  nothing when it doesn't, rather than a misleading "no data."
+- **"Report both columns where they diverge" (line 675-676) is not implemented.** No `toolUseResult`
+  size is captured anywhere — `parse.py` never reads it (§3.2.1's "measure `message.content`, not
+  `toolUseResult`" constraint means the byte count needed for the second column doesn't exist in
+  `ParsedSession` at all). Adding it needs a `parse.py` change this phase didn't scope; deferred to
+  a later phase.
+- **"attributing dollars to each" (line 680) is not implemented for any `--bloat` finding** — every
+  finding reports bytes and counts only. `repeat_read_rows`' own docstring argues why *that*
+  finding can't be honestly dollarized (re-read content is paid for again across every later turn's
+  input/cache tokens, which can't be isolated). `oversized_tool_rows` and `unbounded_bash_rows`
+  could be dollarized via the existing `pricing.cost`; this phase made a deliberate bytes-only
+  choice for all findings instead, for consistency across the section rather than dollarizing some
+  and not others.
 
 ### Phase 6 — `sk churn`, `filehistory.py`, `sk stores`, skill `edit-churn`
 

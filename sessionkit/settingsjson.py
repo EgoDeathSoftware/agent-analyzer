@@ -96,3 +96,31 @@ def read_allowed_tools(claude_json_path: Path, cwd: str) -> list[str]:
     project = projects.get(cwd) if isinstance(projects, dict) else None
     allowed = project.get("allowedTools") if isinstance(project, dict) else None
     return [str(a) for a in allowed] if isinstance(allowed, list) else []
+
+
+def read_last_model_usage(claude_json_path: Path, cwd: str) -> dict[str, dict[str, Any]]:
+    """``<home>/.claude.json:projects[cwd].lastModelUsage`` — per-model tokens and cost for
+    that project's most recent session, computed by Claude Code itself rather than either
+    hand-maintained pricing table (PLAN.md §3.2.2). Tolerates absence of any part.
+    """
+    try:
+        data = json.loads(claude_json_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    projects = data.get("projects") if isinstance(data, dict) else None
+    project = projects.get(cwd) if isinstance(projects, dict) else None
+    usage = project.get("lastModelUsage") if isinstance(project, dict) else None
+    return usage if isinstance(usage, dict) else {}
+
+
+def read_last_session_id(claude_json_path: Path, cwd: str) -> str:
+    """``<home>/.claude.json:projects[cwd].lastSessionId`` — which session
+    ``lastModelUsage`` describes, since the field is overwritten per project and only ever
+    covers the single most recent session (PLAN.md §3.2.2)."""
+    try:
+        data = json.loads(claude_json_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return ""
+    projects = data.get("projects") if isinstance(data, dict) else None
+    project = projects.get(cwd) if isinstance(projects, dict) else None
+    return str(project.get("lastSessionId") or "") if isinstance(project, dict) else ""

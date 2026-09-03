@@ -69,5 +69,42 @@ class CostTest(unittest.TestCase):
                            pricing.cost("claude-haiku-4-5", *args))
 
 
+class TrackerParityTest(unittest.TestCase):
+    """SPEC.md §4.1: `pricing.py` and the tracker's `server/src/pricing.ts` are two
+    hand-maintained tables over one set of facts and must agree to the cent. This transcribes
+    pricing.ts's `PRICING` const (read directly from claude-project-tracker/server/src/pricing.ts
+    as of 2026-09-03) so a rate drifting on either side without the other fails here. Update
+    this table in lockstep with any edit to either pricing.py or pricing.ts.
+    """
+
+    TRACKER_PRICING_TS: dict[str, tuple[float, float]] = {
+        "claude-fable-5": (10.00, 50.00),
+        "claude-mythos-5": (10.00, 50.00),
+        "claude-opus-5": (5.00, 25.00),
+        "claude-opus-4-8": (5.00, 25.00),
+        "claude-opus-4-7": (5.00, 25.00),
+        "claude-opus-4-6": (5.00, 25.00),
+        "claude-opus-4-5": (5.00, 25.00),
+        "claude-sonnet-5": (3.00, 15.00),
+        "claude-sonnet-4-6": (3.00, 15.00),
+        "claude-sonnet-4-5": (3.00, 15.00),
+        "claude-haiku-4-5": (1.00, 5.00),
+    }
+
+    def test_rates_mirror_tracker_pricing_ts(self) -> None:
+        for model, (in_per_m, out_per_m) in self.TRACKER_PRICING_TS.items():
+            rates = pricing.rates_for(model)
+            self.assertAlmostEqual(rates.input, in_per_m / 1_000_000, msg=model)
+            self.assertAlmostEqual(rates.output, out_per_m / 1_000_000, msg=model)
+
+    def test_no_model_exists_in_only_one_table(self) -> None:
+        self.assertEqual(set(pricing.PRICING), set(self.TRACKER_PRICING_TS))
+
+    def test_cache_multipliers_match_tracker(self) -> None:
+        # server/src/pricing.ts CACHE_WRITE_MULTIPLIER / CACHE_READ_MULTIPLIER.
+        self.assertEqual(pricing.CACHE_WRITE_MULTIPLIER, 1.25)
+        self.assertEqual(pricing.CACHE_READ_MULTIPLIER, 0.10)
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
