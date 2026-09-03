@@ -12,7 +12,8 @@ import re
 import sys
 from datetime import datetime, timedelta, timezone
 
-from sessionkit import __version__, corpus as corpus_mod, pricing, query
+from sessionkit import __version__, corpus as corpus_mod, pricing, query, search
+from sessionkit import sources as src_mod
 from sessionkit.classify import classify_error
 from sessionkit.corpus import Corpus
 from sessionkit.render import (BUDGET_AGGREGATE_KB, BUDGET_EXCERPT_KB, BUDGET_INDEX_KB,
@@ -398,6 +399,44 @@ def cmd_files(corpus: Corpus, args: argparse.Namespace) -> str:
     return report.render()
 
 
+def cmd_search(corpus: Corpus, args: argparse.Namespace) -> str:
+    """Layer 2: full-text search across every reachable transcript's raw lines.
+
+    Matches raw JSONL text, not any in-memory preview, so a query that only appears in a
+    spilled tool result's full text still hits (PLAN.md §3.2.1) — the transcript's own
+    `toolUseResult` copy sits on the same line as the truncated stub. No index: only files
+    that already matched get parsed, for scope filtering and a line-anchored excerpt.
+    """
+    if args.per_session < 0 or args.limit < 0:
+        raise SystemExit("--per-session and --limit must be >= 0 (0 means unlimited)")
+    pattern = search.compile_query(args.query, regex=args.regex,
+                                   case_sensitive=args.case_sensitive)
+    scope = _scope(args)
+    rows, degraded, total = search.search_rows(
+        corpus.sources, scope, pattern, context=args.context,
+        per_session=args.per_session, limit=args.limit)
+
+    report = Report(args.json, args.budget_kb or BUDGET_AGGREGATE_KB, full=args.full)
+    report.meta(query=args.query, regex=args.regex, hits=total, shown=len(rows))
+    if total > len(rows):
+        report.text(f"{total - len(rows)} additional match(es) exist beyond --limit/"
+                    "--per-session and are not shown; raise --limit or --per-session to see "
+                    "them.")
+    if degraded:
+        report.text(f"{degraded} match(es) found only in a spilled tool-results/ file whose "
+                    "transcript could not be resolved and are omitted from the count above "
+                    "(checked regardless of --project/--since scope, since an unresolvable "
+                    "spill has no parsed session to filter against) — the session's own copy "
+                    "has aged out from under the spill file.")
+    report.section("Matches")
+    report.table(
+        ["sid", "project", "line", "kind", "excerpt"],
+        [[r["sid"][:8], r["project"], r["line"], r["kind"], r["excerpt"]] for r in rows],
+        key="matches",
+    )
+    return report.render()
+
+
 def _headline(corpus: Corpus, scope: query.Filter, rows: list[query.Row], total: int) -> str:
     """Summarise the clusters, ranking by breadth as well as raw count.
 
@@ -621,12 +660,33 @@ def build_parser() -> argparse.ArgumentParser:
     p_files.add_argument("--uncommitted", action="store_true",
                          help="intersect with `git status --porcelain` in the session's cwd")
     _subagents_arg(p_files, "include")
+
+    p_search = sub.add_parser("search", parents=[common, scoped],
+                              help="full-text search across every transcript (layer 2)")
+    p_search.add_argument("query", help="text to search for (or a pattern with --regex)")
+    p_search.add_argument("--regex", action="store_true",
+                          help="treat query as a regular expression")
+    p_search.add_argument("--case-sensitive", action="store_true",
+                          help="match case exactly instead of folding it")
+    p_search.add_argument("--context", type=int, default=2,
+                          help="lines of context before/after each hit, by transcript line "
+                               "number, not turn count (default: 2)")
+    p_search.add_argument("--per-session", type=int, default=1,
+                          help="max hits shown per session, keeping the most recent match(es) "
+                               "first; 0 for unlimited (default: 1)")
+    p_search.add_argument("--limit", type=int, default=20,
+                          help="max hit rows returned overall; 0 for unlimited (default: 20)")
+    p_search.add_argument("--full", action="store_true",
+                          help="do not truncate excerpt cells in text mode (JSON never "
+                               "truncates)")
+    _subagents_arg(p_search, "include")
     return parser
 
 
 COMMANDS = {"doctor": cmd_doctor, "index": cmd_index, "show": cmd_show, "errors": cmd_errors,
              "commands": cmd_commands, "hooks": cmd_hooks, "forensics": cmd_forensics,
-             "children": cmd_children, "tail": cmd_tail, "files": cmd_files}
+             "children": cmd_children, "tail": cmd_tail, "files": cmd_files,
+             "search": cmd_search}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -643,14 +703,19 @@ def main(argv: list[str] | None = None) -> int:
 def _corpus_for(args: argparse.Namespace) -> Corpus:
     """Parse only what the command needs.
 
-    ``show`` wants one session, so it tries to find it by filename first; every other command
-    aggregates and needs everything. The fast path is advisory — when it cannot confirm a hit
-    we fall back to a full parse rather than reporting the session missing.
+    ``show`` wants one session, so it tries to find it by filename first. ``search`` needs no
+    parsed sessions at all up front — it only needs the discovered ``sources`` list, since
+    ``search.search_rows`` parses (via ``corpus.load_one``) only the files that already
+    matched the raw-text scan. Every other command aggregates and needs everything. The fast
+    paths are advisory — when ``show``'s cannot confirm a hit we fall back to a full parse
+    rather than reporting the session missing.
     """
     if args.command == "show":
         entry = corpus_mod.load_session(args.sid)
         if entry is not None:
             return Corpus(sessions=[entry])
+    if args.command == "search":
+        return Corpus(sources=src_mod.discover())
     return corpus_mod.load()
 
 
