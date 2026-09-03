@@ -52,7 +52,11 @@ def preview(text: str, limit: int) -> str:
         A single-line, redacted, length-capped preview. Truncation is marked with a trailing
         ellipsis so callers can tell a short value from a clipped one.
     """
-    flat = " ".join(redact(text).split())
+    # Only the leading slice can ever surface in a `limit`-character preview, so redacting the
+    # rest is pure waste — tool output routinely runs to hundreds of KB, and running 11 regexes
+    # over all of it was most of a corpus parse. The margin covers whitespace collapsing eating
+    # into the budget (e.g. heavily indented text); it can only shrink a prefix, never grow it.
+    flat = " ".join(redact(text[: limit * 8]).split())
     if len(flat) <= limit:
         return flat
     return flat[: limit - 1] + "…"

@@ -110,8 +110,30 @@ def cmd_doctor(corpus: Corpus, args: argparse.Namespace) -> str:
     return report.render()
 
 
+def _index_cutoff(args: argparse.Namespace) -> str:
+    """Resolve the ``--since`` window for ``sk index``.
+
+    Layer 1 is meant for "what have I been doing", so it defaults to the last 3 days rather
+    than the whole corpus. ``--today``/``--last`` narrow or widen that window; an explicit
+    ``--since`` (shared with every other query command) still wins outright.
+    """
+    since, today, last = args.since, args.today, args.last
+    if sum(bool(x) for x in (since, today, last is not None)) > 1:
+        raise SystemExit("--since, --today, and --last are mutually exclusive")
+    if since:
+        return since
+    if today:
+        return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    if last is not None:
+        if last < 1:
+            raise SystemExit(f"--last must be a positive integer, got {last}")
+        return f"{last}d"
+    return "3d"
+
+
 def cmd_index(corpus: Corpus, args: argparse.Namespace) -> str:
-    """Layer 1: one line per session."""
+    """Layer 1: one line per session, oldest first (most recent last)."""
+    args.since = _index_cutoff(args)
     rows = query.index_rows(corpus, _scope(args))
     report = Report(args.json, args.budget_kb or BUDGET_INDEX_KB)
     report.meta(sessions=len(rows), subagents=args.subagents)
@@ -469,7 +491,8 @@ def cmd_tail(corpus: Corpus, args: argparse.Namespace) -> str:
     report.section(f"Tail (last {args.n})")
     report.table(["line", "role", "chars", "preview"],
                  [[r["line"], r["role"], r["chars"], r["preview"]]
-                  for r in query.tail_rows(entry, n=args.n, full=args.full)],
+                  for r in query.tail_rows(entry, n=args.n, full=args.full,
+                                           include_tools=not args.no_tools)],
                  key="tail")
     return report.render()
 
@@ -772,6 +795,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_index.add_argument("--label-contains",
                          help="only sessions whose title/label contains this text "
                               "(case-insensitive)")
+    p_index.add_argument("--today", action="store_true",
+                         help="only sessions ended today (UTC); default is the last 3 days")
+    p_index.add_argument("--last", type=int, metavar="N",
+                         help="only sessions ended in the last N days; default is 3")
     _subagents_arg(p_index, "exclude")
 
     p_show = sub.add_parser("show", parents=[common_sub],
@@ -841,6 +868,8 @@ def build_parser() -> argparse.ArgumentParser:
                             "sessions from `sessions/*.json`)")
     p_tail.add_argument("--n", type=int, default=6,
                         help="number of trailing turns to include (default: 6)")
+    p_tail.add_argument("--no-tools", action="store_true",
+                        help="only chat messages (user/assistant), no tool calls")
     p_tail.add_argument("--full", action="store_true",
                         help="re-read message text from source for full fidelity "
                              "(JSON never truncates a cell either way)")

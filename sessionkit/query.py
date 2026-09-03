@@ -116,14 +116,14 @@ def totals(corpus: Corpus) -> Row:
 # --- index ------------------------------------------------------------------------------
 
 def index_rows(corpus: Corpus, scope: Filter) -> list[Row]:
-    """One row per in-scope session, newest first.
+    """One row per in-scope session, oldest first so the most recent session prints last.
 
-    Sessions with no end timestamp sort last, matching SQLite's placement of NULLs under
-    ``ORDER BY ended_at DESC``. A naive ``sorted(key=...)`` over the raw value would raise on
-    the empty string mixing with real timestamps under some comparisons, so it is coalesced.
+    Sessions with no end timestamp sort first, matching the empty string's place at the bottom
+    of an ascending sort. A naive ``sorted(key=...)`` over the raw value would raise on the
+    empty string mixing with real timestamps under some comparisons, so it is coalesced.
     """
     rows = scope.apply(corpus)
-    rows.sort(key=lambda e: e.session.ended_at or "", reverse=True)
+    rows.sort(key=lambda e: e.session.ended_at or "")
     out: list[Row] = []
     for entry in rows:
         s = entry.session
@@ -403,8 +403,14 @@ def tail_candidates(corpus: Corpus, scope: Filter,
     ]
 
 
-def tail_rows(entry: Loaded, n: int = 6, full: bool = False) -> list[Row]:
-    """Row shape for `sk tail <sid>`: last N messages plus their trailing tool calls."""
+def tail_rows(entry: Loaded, n: int = 6, full: bool = False,
+              include_tools: bool = True) -> list[Row]:
+    """Row shape for `sk tail <sid>`: last N messages plus their trailing tool calls.
+
+    ``include_tools=False`` drops the tool-call rows entirely, leaving just the last N chat
+    messages (user/assistant) — for a transcript with heavy tool use, the interleaved calls
+    can outnumber the messages many times over and bury the actual conversation.
+    """
     tail = entry.session.messages[-n:] if n > 0 else entry.session.messages
     if not tail:
         return []
@@ -413,6 +419,8 @@ def tail_rows(entry: Loaded, n: int = 6, full: bool = False) -> list[Row]:
     msg_rows = [{"line": m.line, "role": m.role, "chars": m.text_len,
                  "preview": texts.get(m.line, m.preview) if full else m.preview}
                 for m in tail]
+    if not include_tools:
+        return msg_rows
     # Interleave any tool calls whose line falls inside the tail window so the reader
     # sees mid_tool context in place, not out of band.
     tool_rows_in_window = [

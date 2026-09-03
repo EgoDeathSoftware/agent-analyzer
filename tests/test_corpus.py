@@ -109,9 +109,11 @@ class CorpusTest(unittest.TestCase):
     def test_index_excludes_subagents_by_default(self) -> None:
         self._write_corpus()
         loaded = self._load()
-        self.assertNotIn("cccc3333", cli.cmd_index(loaded, self._args("index")))
+        self.assertNotIn("cccc3333",
+                         cli.cmd_index(loaded, self._args("index", "--since", "2020-01-01")))
         self.assertIn("cccc3333",
-                      cli.cmd_index(loaded, self._args("index", "--subagents", "only")))
+                      cli.cmd_index(loaded, self._args("index", "--subagents", "only",
+                                                        "--since", "2020-01-01")))
 
     def test_errors_report_ranks_hook_blocks_first(self) -> None:
         self._write_corpus()
@@ -780,7 +782,8 @@ class IndexColumnsTest(unittest.TestCase):
         self.assertEqual(rows[0]["parent_sid"], fx.SID)
         self.assertEqual(rows[0]["agent_type"], "Explore")
 
-        args = cli.build_parser().parse_args(["index", "--subagents", "only"])
+        args = cli.build_parser().parse_args(["index", "--subagents", "only",
+                                              "--since", "2020-01-01"])
         out = cli.cmd_index(corpus.load(), args)
         self.assertIn("parent_sid", out)
         self.assertIn("Explore", out)
@@ -796,7 +799,7 @@ class IndexColumnsTest(unittest.TestCase):
     def test_index_json_always_carries_lineage_keys_even_with_subagents_excluded(self) -> None:
         """--subagents exclude is the CLI default; JSON callers must not lose the fields."""
         fx.write(self.home, fx.simple_session(), name="aaaa1111.jsonl")
-        args = cli.build_parser().parse_args(["index", "--json"])
+        args = cli.build_parser().parse_args(["index", "--json", "--since", "2020-01-01"])
         self.assertEqual(args.subagents, "exclude")
         out = json.loads(cli.cmd_index(corpus.load(), args))
         self.assertIn("parent_sid", out["sessions"][0])

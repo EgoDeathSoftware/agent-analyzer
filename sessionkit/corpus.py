@@ -95,10 +95,10 @@ def load_one(source: src.Source, path: Path, dir_name: str) -> Loaded:
     annotate_errors(session)
     session.end_state, session.end_reason = derive_end_state(session)
     anomalies = detect(session)
-    loaded = Loaded(session, project_key(session.cwd, source.id, dir_name), anomalies)
-    from sessionkit import query  # local: query imports Loaded from this module
-    query.tail_signal(loaded, n=6)
-    return loaded
+    # tail_signal is left unset here: query.tail_signal() memoises onto the session on first
+    # real use, and only `sk tail`/`sk files` ever ask for it — every other command paid for
+    # a re-read of each session's last 6 lines from disk for nothing.
+    return Loaded(session, project_key(session.cwd, source.id, dir_name), anomalies)
 
 
 def _disambiguate(sessions: list[Loaded]) -> None:
