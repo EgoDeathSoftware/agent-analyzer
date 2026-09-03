@@ -144,5 +144,55 @@ class BloatFindingsTest(CostQueryTestBase):
         self.assertIsNone(ratio["ratio"])
 
 
+class SubagentDispatchTest(CostQueryTestBase):
+    def _write_parent_and_child(self, child_records, agent_type="general-purpose") -> None:
+        fx.write(self.home, [
+            fx.user("go"),
+            fx.assistant([fx.tool_use("d1", "Agent", {"description": "Do the thing"})]),
+            fx.task_notification("d1", "childone01"),
+        ], name="aaaa1111.jsonl")
+        fx.write_subagent(self.home, child_records, agent_id="childone01",
+                          agent_type=agent_type)
+
+    def test_sunk_flagged_for_non_complete_child(self) -> None:
+        # Ends mid-tool: end_state is interrupted-tool, not complete.
+        self._write_parent_and_child([
+            fx.user("go"),
+            fx.assistant([fx.tool_use("t1", "Bash", {"command": "sleep 100"})]),
+        ])
+        corp = corpus.load()
+        rows = query.subagent_dispatch_rows(corp, query.Filter())
+        self.assertEqual(len(rows), 1)
+        self.assertTrue(rows[0]["sunk"])
+
+    def test_complete_child_is_not_sunk(self) -> None:
+        self._write_parent_and_child(fx.simple_session())
+        corp = corpus.load()
+        rows = query.subagent_dispatch_rows(corp, query.Filter())
+        self.assertFalse(rows[0]["sunk"])
+
+    def test_wasted_requires_sunk_and_cost_above_threshold(self) -> None:
+        self._write_parent_and_child([
+            fx.user("go"),
+            fx.assistant([fx.tool_use("t1", "Bash", {"command": "sleep 100"})],
+                        usage={"input_tokens": 1_000_000, "output_tokens": 0},
+                        model="claude-opus-5"),
+        ])
+        corp = corpus.load()
+        rows = query.subagent_dispatch_rows(corp, query.Filter())
+        self.assertTrue(rows[0]["sunk"])
+        self.assertGreater(rows[0]["cost_usd"], query.BLOAT_DISPATCH_USD)
+        self.assertTrue(rows[0]["wasted"])
+
+    def test_summary_states_sample_size(self) -> None:
+        self._write_parent_and_child(fx.simple_session())
+        corp = corpus.load()
+        summary = query.subagent_cost_summary(corp, query.Filter())
+        self.assertEqual(summary["dispatches"], 1)
+        self.assertEqual(summary["resolved"], 1)
+        self.assertIn("parent_cost_total", summary)
+        self.assertIn("child_cost_total", summary)
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

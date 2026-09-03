@@ -921,3 +921,44 @@ def cache_ratio(corpus: Corpus, scope: Filter) -> Row:
     create = sum(e.session.tok_cache_create for e in scope.apply(corpus))
     return {"cache_read": read, "cache_create": create,
             "ratio": read / create if create else None}
+
+
+def annotate_dispatch(row: Row) -> Row:
+    """Add ``sunk``/``wasted`` flags to one ``children_rows``-shaped row.
+
+    ``sunk``: the child was resolved but never reached ``complete`` — real spend with no
+    surviving output, reported as its own line rather than folded into the parent's total
+    (PLAN.md §7 Phase 5). ``wasted``: sunk *and* costing more than :data:`BLOAT_DISPATCH_USD` —
+    the deterministic half of the "was it discarded" test; see :func:`subagent_dispatch_rows`
+    for why the other half is out of scope here.
+    """
+    sunk = bool(row["resolved"]) and row["state"] not in ("complete", "")
+    wasted = sunk and row["cost_usd"] > BLOAT_DISPATCH_USD
+    return {**row, "sunk": sunk, "wasted": wasted}
+
+
+def subagent_dispatch_rows(corpus: Corpus, scope: Filter) -> list[Row]:
+    """Every ``Agent`` dispatch across scope, resolved and annotated — the fleet-wide
+    counterpart to :func:`children_rows`, which this reuses per parent session."""
+    out = []
+    for parent in [e for e in scope.apply(corpus) if not e.session.is_subagent]:
+        for row in children_rows(parent, corpus):
+            out.append({**annotate_dispatch(row), "parent_sid": parent.session.sid})
+    out.sort(key=lambda r: -r["cost_usd"])
+    return out
+
+
+def subagent_cost_summary(corpus: Corpus, scope: Filter) -> Row:
+    """Aggregate subagent-vs-parent cost comparison over scope. States its own sample size so
+    a thin result isn't read as a conclusion (PLAN.md §7 Phase 5)."""
+    rows = subagent_dispatch_rows(corpus, scope)
+    resolved = [r for r in rows if r["resolved"]]
+    parent_total = sum(e.session.cost_usd for e in scope.apply(corpus)
+                       if not e.session.is_subagent)
+    return {
+        "dispatches": len(rows), "resolved": len(resolved),
+        "sunk": sum(1 for r in resolved if r["sunk"]),
+        "wasted": sum(1 for r in resolved if r["wasted"]),
+        "child_cost_total": sum(r["cost_usd"] for r in resolved),
+        "parent_cost_total": parent_total,
+    }
