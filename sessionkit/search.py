@@ -176,6 +176,7 @@ def search_rows(sources: list[Source], scope: query.Filter, pattern: re.Pattern[
 
     by_source = {s.id: s for s in sources}
     all_rows: list[Row] = []
+    seen_lines: set[tuple[str, int]] = set()
     degraded = 0
     for (source_id, path), file_hits in by_file.items():
         source = by_source.get(source_id)
@@ -197,6 +198,10 @@ def search_rows(sources: list[Source], scope: query.Filter, pattern: re.Pattern[
         if not scope.matches(entry):
             continue
         for hit in resolved:
+            key = (entry.session.sid, hit.line_no)
+            if key in seen_lines:
+                continue
+            seen_lines.add(key)
             all_rows.append(_build_row(entry, hit, context))
 
     all_rows.sort(key=lambda r: (r["_ended_at"] or "", r["line"]), reverse=True)
@@ -305,7 +310,7 @@ def _build_row(entry: Loaded, hit: Hit, context: int) -> Row:
     """
     entries = _context_entries(entry, hit.line_no, context) if hit.line_no else []
     center = next((e for e in entries if e[0] == hit.line_no), None)
-    excerpt = _format_excerpt(entries, hit.line_no) if entries else redact_text(hit.raw_line)
+    excerpt = _format_excerpt(entries, hit.line_no) if center else redact_text(hit.raw_line)
     return {
         "sid": entry.session.sid,
         "project": entry.project_key,

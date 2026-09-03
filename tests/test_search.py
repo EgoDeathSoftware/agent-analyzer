@@ -296,6 +296,91 @@ class SearchScan(unittest.TestCase):
         self.assertEqual(rows, [])
         self.assertEqual(degraded, 1)
 
+    def test_search_rows_falls_back_to_the_raw_line_when_the_hit_line_has_no_entry(self) -> None:
+        # `type: "mode"` is not one of the record types _Parser.feed() dispatches on
+        # (sessionkit/parse.py) — it produces no Message/ToolCall/SysEvent, only updates to
+        # cwd/timestamps via _meta(). Neighbouring lines *do* have entries, so `entries` is
+        # non-empty even though nothing in it matches the hit line — the fallback must key off
+        # `center`, not `entries`, or this would render unrelated neighbour text with no `>>`.
+        import tempfile
+        from pathlib import Path
+        from tests import fixtures as fx
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            fx.write(home, [
+                fx.user("start", ts="2026-08-01T00:00:00Z"),
+                {"type": "mode", "sessionId": fx.SID, "cwd": fx.CWD,
+                 "timestamp": "2026-08-01T00:00:01Z", "note": "needle-in-mode-record"},
+                fx.assistant([{"type": "text", "text": "ok"}], ts="2026-08-01T00:00:02Z"),
+            ])
+            pattern = search.compile_query("needle-in-mode-record", regex=False,
+                                           case_sensitive=False)
+            rows, _ = search.search_rows([self._source(home)], self._empty_scope(), pattern)
+        self.assertEqual(rows[0]["kind"], "raw")
+        self.assertIn("needle-in-mode-record", rows[0]["excerpt"])
+
+    def test_search_rows_deduplicates_a_hit_present_in_both_the_transcript_and_its_spill_copy(
+        self,
+    ) -> None:
+        # PLAN.md §3.2.1: the transcript's toolUseResult/message.content copy and the on-disk
+        # tool-results/*.txt spill copy normally coexist. A query matching both must resolve
+        # to one row, not two. per_session=0 (unlimited) so the default per-session cap of 1
+        # can't mask a real duplicate — both would-be rows share one sid.
+        import tempfile
+        from pathlib import Path
+        from tests import fixtures as fx
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            fx.write(home, [
+                fx.user("run it"),
+                fx.assistant([fx.tool_use("toolu_dup", "Bash", {"command": "true"})]),
+                fx.tool_result("toolu_dup", "the needle-in-both-copies text"),
+            ])
+            self._write_spill(home, "-home-dev-myproject", fx.SID, "toolu_dup",
+                              "the needle-in-both-copies text")
+            pattern = search.compile_query("needle-in-both-copies", regex=False,
+                                           case_sensitive=False)
+            rows, degraded = search.search_rows([self._source(home)], self._empty_scope(),
+                                                 pattern, per_session=0)
+        self.assertEqual(degraded, 0)
+        self.assertEqual(len(rows), 1)
+
+    def test_search_rows_excerpt_shows_text_past_the_message_preview_cap(self) -> None:
+        # MSG_PREVIEW is 200 chars (parse.py). If _context_entries ever reverted to using
+        # Message.preview instead of query.full_message, this test would catch it.
+        import tempfile
+        from pathlib import Path
+        from tests import fixtures as fx
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            long_text = ("x" * 250) + " needle-past-msg-cap"
+            fx.write(home, [fx.user(long_text)])
+            pattern = search.compile_query("needle-past-msg-cap", regex=False,
+                                           case_sensitive=False)
+            rows, _ = search.search_rows([self._source(home)], self._empty_scope(), pattern)
+        self.assertIn("needle-past-msg-cap", rows[0]["excerpt"])
+
+    def test_search_rows_excerpt_shows_tool_output_past_the_preview_cap(self) -> None:
+        # OUTPUT_PREVIEW is 2000 chars (parse.py). Distinct from the toolUseResult case:
+        # this text lives inside message.content's tool_result block, which query.full_output
+        # *can* recover — if _context_entries ever reverted to ToolCall.output_preview, this
+        # would catch it.
+        import tempfile
+        from pathlib import Path
+        from tests import fixtures as fx
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            long_output = ("y" * 2200) + " needle-past-output-cap"
+            fx.write(home, [
+                fx.user("run it"),
+                fx.assistant([fx.tool_use("t1", "Bash", {"command": "true"})]),
+                fx.tool_result("t1", long_output),
+            ])
+            pattern = search.compile_query("needle-past-output-cap", regex=False,
+                                           case_sensitive=False)
+            rows, _ = search.search_rows([self._source(home)], self._empty_scope(), pattern)
+        self.assertIn("needle-past-output-cap", rows[0]["excerpt"])
+
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
