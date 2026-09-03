@@ -101,6 +101,41 @@ class SearchScan(unittest.TestCase):
         pattern = search.compile_query("banana", regex=False, case_sensitive=False)
         self.assertEqual(search.scan_corpus([unreachable], pattern), [])
 
+    def _write_spill(self, home, project_dirname, sid, tool_use_id, text):
+        from pathlib import Path
+        spill_dir = home / "projects" / project_dirname / sid / "tool-results"
+        spill_dir.mkdir(parents=True, exist_ok=True)
+        (spill_dir / f"{tool_use_id}.txt").write_text(text, encoding="utf-8")
+
+    def test_scan_corpus_finds_hit_in_a_spill_file_not_in_the_transcript(self) -> None:
+        # The transcript itself never mentions the needle: this is the "aged out" case
+        # (PLAN.md §3.2.1) where only the on-disk spill copy still carries the full text.
+        import tempfile
+        from pathlib import Path
+        from tests import fixtures as fx
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            fx.write(home, [
+                fx.user("run it"),
+                fx.assistant([fx.tool_use("toolu_spill1", "Bash", {"command": "true"})]),
+                fx.tool_result("toolu_spill1", "Output too large (9KB)"),
+            ])
+            self._write_spill(home, "-home-dev-myproject", fx.SID, "toolu_spill1",
+                              "…" * 10 + " needle-in-spill " + "…" * 10)
+            pattern = search.compile_query("needle-in-spill", regex=False,
+                                           case_sensitive=False)
+            hits = search.scan_corpus([self._source(home)], pattern)
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(hits[0].kind, "spill")
+        self.assertTrue(hits[0].path.endswith("toolu_spill1.txt"))
+
+    def test_scan_corpus_tolerates_a_source_with_no_projects_dir(self) -> None:
+        from pathlib import Path
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            pattern = search.compile_query("banana", regex=False, case_sensitive=False)
+            self.assertEqual(search.scan_corpus([self._source(Path(tmp))], pattern), [])
+
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

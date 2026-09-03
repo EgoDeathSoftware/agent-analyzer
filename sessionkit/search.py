@@ -69,7 +69,8 @@ class Hit:
 
 def scan_corpus(sources: list[Source], pattern: re.Pattern[str], *,
                 max_hits_per_file: int = _MAX_HITS_PER_FILE) -> list[Hit]:
-    """Raw substring/regex scan of every reachable source's transcripts.
+    """Raw substring/regex scan of every reachable source's transcripts, plus any spilled
+    tool-result file.
 
     No parsing happens here — this is the fast pass PLAN.md §7 Phase 4 measures at a few
     milliseconds full-corpus (SPEC.md §2, `rg` over the whole corpus). Only files that
@@ -82,12 +83,14 @@ def scan_corpus(sources: list[Source], pattern: re.Pattern[str], *,
             file with a very common query still returns quickly); other files keep scanning.
 
     Returns:
-        Every hit found, in ``sources``/``corpus.transcripts`` order.
+        Every hit found, in ``sources``/``corpus.transcripts`` order, transcript hits before
+        spill-file hits within each source.
     """
     hits: list[Hit] = []
     for source in scannable(sources):
         for path, dir_name in corpus.transcripts(source):
             hits.extend(_scan_jsonl(source, path, dir_name, pattern, max_hits_per_file))
+        hits.extend(_scan_spill_files(source, pattern, max_hits_per_file))
     return hits
 
 
@@ -110,4 +113,32 @@ def _scan_jsonl(source: Source, path: Path, dir_name: str, pattern: re.Pattern[s
                         break
     except OSError:
         return found
+    return found
+
+
+def _scan_spill_files(source: Source, pattern: re.Pattern[str], max_hits: int) -> list[Hit]:
+    """Match ``pattern`` against every ``<project>/<sid>/tool-results/*.txt`` file.
+
+    This third copy of a spilled result (PLAN.md §3.2.1) is needed only when the
+    transcript's own ``toolUseResult`` copy has aged out from under it — the common case is
+    already covered by :func:`_scan_jsonl`, so this pass exists purely for that fallback.
+    """
+    found: list[Hit] = []
+    root = source.projects_dir
+    if not root.is_dir():
+        return found
+    try:
+        spill_files = sorted(root.glob("*/*/tool-results/*.txt"))
+    except OSError:
+        return found
+    for spill_path in spill_files:
+        try:
+            text = spill_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if pattern.search(text):
+            dir_name = spill_path.parent.parent.parent.name
+            found.append(Hit("spill", source.id, dir_name, str(spill_path), 0, text))
+            if max_hits and len(found) >= max_hits:
+                break
     return found
