@@ -28,7 +28,7 @@ class FilesSessionScoped(unittest.TestCase):
         env_file = self.tmp / "empty.env"
         env_file.write_text("", encoding="utf-8")
         patcher = mock.patch.dict(os.environ, {
-            "CLAUDE_DIR": str(self.home),
+            "CLAUDE_DIR": str(self.home), "PI_DIR": "/nonexistent/pi",
             "SESSIONKIT_ENV": str(env_file),
         })
         patcher.start()

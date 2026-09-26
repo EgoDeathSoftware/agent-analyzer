@@ -23,7 +23,8 @@ class CostQueryTestBase(unittest.TestCase):
         self.home.mkdir()
         (tmp / "empty.env").write_text("", encoding="utf-8")
         patcher = mock.patch.dict(os.environ, {
-            "CLAUDE_DIR": str(self.home), "SESSIONKIT_ENV": str(tmp / "empty.env")})
+            "CLAUDE_DIR": str(self.home), "PI_DIR": "/nonexistent/pi",
+            "SESSIONKIT_ENV": str(tmp / "empty.env")})
         patcher.start()
         self.addCleanup(patcher.stop)
 

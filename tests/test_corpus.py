@@ -33,7 +33,7 @@ class CorpusTest(unittest.TestCase):
         env_file = self.tmp / "empty.env"
         env_file.write_text("", encoding="utf-8")
         patcher = mock.patch.dict(os.environ, {
-            "CLAUDE_DIR": str(self.home),
+            "CLAUDE_DIR": str(self.home), "PI_DIR": "/nonexistent/pi",
             "SESSIONKIT_ENV": str(env_file),
         })
         patcher.start()
@@ -196,7 +196,8 @@ class QueryTest(unittest.TestCase):
         home.mkdir()
         (tmp / "empty.env").write_text("", encoding="utf-8")
         patcher = mock.patch.dict(os.environ, {
-            "CLAUDE_DIR": str(home), "SESSIONKIT_ENV": str(tmp / "empty.env")})
+            "CLAUDE_DIR": str(home), "PI_DIR": "/nonexistent/pi",
+            "SESSIONKIT_ENV": str(tmp / "empty.env")})
         patcher.start()
         self.addCleanup(patcher.stop)
         # Two tools failing the same number of times, deliberately written in an order that
@@ -251,7 +252,8 @@ class CommandsTest(unittest.TestCase):
         self.home.mkdir()
         (tmp / "empty.env").write_text("", encoding="utf-8")
         patcher = mock.patch.dict(os.environ, {
-            "CLAUDE_DIR": str(self.home), "SESSIONKIT_ENV": str(tmp / "empty.env")})
+            "CLAUDE_DIR": str(self.home), "PI_DIR": "/nonexistent/pi",
+            "SESSIONKIT_ENV": str(tmp / "empty.env")})
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -349,7 +351,8 @@ class HooksTest(unittest.TestCase):
         self.home.mkdir()
         (tmp / "empty.env").write_text("", encoding="utf-8")
         patcher = mock.patch.dict(os.environ, {
-            "CLAUDE_DIR": str(self.home), "SESSIONKIT_ENV": str(tmp / "empty.env")})
+            "CLAUDE_DIR": str(self.home), "PI_DIR": "/nonexistent/pi",
+            "SESSIONKIT_ENV": str(tmp / "empty.env")})
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -446,7 +449,8 @@ class ForensicsTest(unittest.TestCase):
         self.home.mkdir()
         (tmp / "empty.env").write_text("", encoding="utf-8")
         patcher = mock.patch.dict(os.environ, {
-            "CLAUDE_DIR": str(self.home), "SESSIONKIT_ENV": str(tmp / "empty.env")})
+            "CLAUDE_DIR": str(self.home), "PI_DIR": "/nonexistent/pi",
+            "SESSIONKIT_ENV": str(tmp / "empty.env")})
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -526,7 +530,8 @@ class ShowSkillsTest(unittest.TestCase):
         self.home.mkdir()
         (tmp / "empty.env").write_text("", encoding="utf-8")
         patcher = mock.patch.dict(os.environ, {
-            "CLAUDE_DIR": str(self.home), "SESSIONKIT_ENV": str(tmp / "empty.env")})
+            "CLAUDE_DIR": str(self.home), "PI_DIR": "/nonexistent/pi",
+            "SESSIONKIT_ENV": str(tmp / "empty.env")})
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -589,7 +594,8 @@ class ChildrenTest(unittest.TestCase):
         self.home.mkdir()
         (tmp / "empty.env").write_text("", encoding="utf-8")
         patcher = mock.patch.dict(os.environ, {
-            "CLAUDE_DIR": str(self.home), "SESSIONKIT_ENV": str(tmp / "empty.env")})
+            "CLAUDE_DIR": str(self.home), "PI_DIR": "/nonexistent/pi",
+            "SESSIONKIT_ENV": str(tmp / "empty.env")})
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -663,7 +669,8 @@ class CostTest(unittest.TestCase):
         self.home.mkdir()
         (tmp / "empty.env").write_text("", encoding="utf-8")
         patcher = mock.patch.dict(os.environ, {
-            "CLAUDE_DIR": str(self.home), "SESSIONKIT_ENV": str(tmp / "empty.env")})
+            "CLAUDE_DIR": str(self.home), "PI_DIR": "/nonexistent/pi",
+            "SESSIONKIT_ENV": str(tmp / "empty.env")})
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -765,7 +772,7 @@ class IndexColumnsTest(unittest.TestCase):
         env_file = self.tmp / "empty.env"
         env_file.write_text("", encoding="utf-8")
         patcher = mock.patch.dict(os.environ, {
-            "CLAUDE_DIR": str(self.home),
+            "CLAUDE_DIR": str(self.home), "PI_DIR": "/nonexistent/pi",
             "SESSIONKIT_ENV": str(env_file),
         })
         patcher.start()
@@ -815,7 +822,8 @@ class ShowFullTest(unittest.TestCase):
         self.home.mkdir()
         (tmp / "empty.env").write_text("", encoding="utf-8")
         patcher = mock.patch.dict(os.environ, {
-            "CLAUDE_DIR": str(self.home), "SESSIONKIT_ENV": str(tmp / "empty.env")})
+            "CLAUDE_DIR": str(self.home), "PI_DIR": "/nonexistent/pi",
+            "SESSIONKIT_ENV": str(tmp / "empty.env")})
         patcher.start()
         self.addCleanup(patcher.stop)
 
