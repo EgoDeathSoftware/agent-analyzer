@@ -137,6 +137,55 @@ class SearchScan(unittest.TestCase):
             pattern = search.compile_query("banana", regex=False, case_sensitive=False)
             self.assertEqual(search.scan_corpus([self._source(Path(tmp))], pattern), [])
 
+    def _pi_source(self, root):
+        from sessionkit.sources import Source
+        return Source(id="pi", kind="pi", layout="single", location="host",
+                     root=root, reachable=True)
+
+    def _write_pi_subagent_corpus(self, home, needle):
+        from tests import fixtures_pi as fx
+        details = {"mode": "single", "results": [
+            fx.subagent_result("scout", "find the bug", needle),
+        ]}
+        fx.write(home, [
+            fx.header(),
+            fx.user_msg("e1", None, "delegate this"),
+            fx.assistant_msg("e2", "e1", [fx.tool_call_block(
+                "c1", "subagent", {"agent": "scout", "task": "find the bug"})]),
+            fx.tool_result_msg("e3", "e2", "c1", "subagent", "found it in foo.py",
+                               details=details),
+        ])
+
+    def test_scan_corpus_excludes_pi_sources(self) -> None:
+        # A pi subagent's nested-only text (details.results[].messages[]) lives on the same
+        # raw JSONL line as the parent's toolResult, so a naive scan would attribute the hit to
+        # the parent session rather than the child conversation that actually contains it —
+        # excluded entirely rather than risk that misattribution (search.py has no per-child
+        # pi-awareness yet).
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            self._write_pi_subagent_corpus(home, "needle-in-subagent")
+            pattern = search.compile_query("needle-in-subagent", regex=False,
+                                           case_sensitive=False)
+            hits = search.scan_corpus([self._pi_source(home)], pattern)
+        self.assertEqual(hits, [])
+
+    def test_search_rows_excludes_pi_sessions(self) -> None:
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            self._write_pi_subagent_corpus(home, "needle-in-subagent")
+            pattern = search.compile_query("needle-in-subagent", regex=False,
+                                           case_sensitive=False)
+            rows, degraded, total = search.search_rows(
+                [self._pi_source(home)], self._empty_scope(), pattern)
+        self.assertEqual(rows, [])
+        self.assertEqual(degraded, 0)
+        self.assertEqual(total, 0)
+
     def _empty_scope(self):
         from sessionkit.query import Filter
         return Filter()

@@ -91,6 +91,15 @@ def scan_corpus(sources: list[Source], pattern: re.Pattern[str], *,
     """
     hits: list[Hit] = []
     for source in scannable(sources):
+        if source.kind == "pi":
+            # A pi transcript can hold a subagent's synthetic child conversation nested inside
+            # one JSONL line (details.results[].messages[], parse_pi.py) — a raw-line hit there
+            # belongs to the child, not the parent, and search_rows/_build_row have no way to
+            # attribute it correctly yet (corpus.load_one returns both as separate Loaded
+            # entries, but a Hit only carries a line number). Excluded here rather than risk
+            # reporting the wrong sid with a fabricated excerpt; revisit once search gains real
+            # pi-awareness.
+            continue
         for path, dir_name in corpus.transcripts(source):
             hits.extend(_scan_jsonl(source, path, dir_name, pattern, max_hits_per_file))
         hits.extend(_scan_spill_files(source, pattern))
@@ -194,9 +203,9 @@ def search_rows(sources: list[Source], scope: query.Filter, pattern: re.Pattern[
                             file_hits[0].raw_line)]
         else:
             try:
-                # [0]: a grep hit always names one Claude Code/opencode transcript file, which
-                # load_one never expands into more than one Loaded — the list return only
-                # holds more than one entry for a pi source's synthetic subagent children.
+                # [0]: scan_corpus excludes pi sources, so every jsonl hit reaching here names
+                # a Claude Code/opencode transcript, which load_one never expands into more
+                # than one Loaded.
                 entry = corpus.load_one(source, Path(path), file_hits[0].dir_name)[0]
             except OSError:
                 continue
