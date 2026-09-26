@@ -150,6 +150,10 @@ class ParsedSession:
     end_state: str = "unknown"
     end_reason: str = ""
     dispatch_edges: list[tuple[str, str]] = field(default_factory=list)
+    #: Synthetic subagent-dispatch child sessions extracted from a `subagent` tool call's
+    #: nested `details.results[].messages[]` — populated only by parse_pi.py; always empty
+    #: for Claude Code / opencode sessions. See parse_pi.py's `_subagent_children`.
+    child_sessions: list["ParsedSession"] = field(default_factory=list)
     tail_signal: str = ""
 
 

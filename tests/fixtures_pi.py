@@ -83,6 +83,24 @@ def write(tmp: Path, entries: list[dict[str, Any]],
     return path
 
 
+def subagent_result(agent: str, task: str, output_text: str, exit_code: int = 0,
+                    stop_reason: str = "stop", error_message: str = "",
+                    usage_cost: float = 0.01) -> dict[str, Any]:
+    """One entry of a `subagent` toolResult's `details.results[]` array."""
+    return {
+        "agent": agent, "agentSource": "user", "task": task, "exitCode": exit_code,
+        "stopReason": stop_reason, "errorMessage": error_message,
+        "usage": {"input": 200, "output": 100, "cacheRead": 0, "cacheWrite": 0,
+                 "cost": usage_cost},
+        "messages": [
+            {"role": "user", "content": task, "timestamp": 1735689600000},
+            {"role": "assistant", "content": [{"type": "text", "text": output_text}],
+             "provider": "anthropic", "model": "claude-haiku-4-5", "stopReason": stop_reason,
+             "timestamp": 1735689601000},
+        ],
+    }
+
+
 def simple_session() -> list[dict[str, Any]]:
     """header -> user -> assistant(toolCall) -> toolResult -> assistant(text)."""
     return [

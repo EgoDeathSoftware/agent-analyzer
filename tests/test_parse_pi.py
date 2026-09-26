@@ -155,3 +155,82 @@ class ParsePiTest(unittest.TestCase):
             handle.write("{not valid json\n")
         session = parse_file(path, "pi")
         self.assertEqual(session.malformed_lines, 1)
+
+
+class ParsePiSubagentTest(unittest.TestCase):
+    """Nested subagent tool-result expansion into synthetic child sessions — spec Sec 4."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+
+    def parse(self, entries: list[dict], **kw) -> "object":
+        return parse_file(fx.write(self.tmp, entries, **kw), "pi")
+
+    def test_subagent_result_produces_synthetic_children(self) -> None:
+        details = {"mode": "parallel", "results": [
+            fx.subagent_result("scout", "find the bug", "found it in foo.py"),
+            fx.subagent_result("worker", "fix it", "fixed", exit_code=1, stop_reason="error",
+                               error_message="ran out of time"),
+        ]}
+        session = self.parse([
+            fx.header(),
+            fx.user_msg("e1", None, "delegate this"),
+            fx.assistant_msg("e2", "e1",
+                             [fx.tool_call_block("c1", "subagent", {"tasks": [{}, {}]})]),
+            fx.tool_result_msg("e3", "e2", "c1", "subagent", "Parallel: 1/2 succeeded",
+                               details=details),
+        ])
+        self.assertEqual(len(session.child_sessions), 2)
+        scout, worker = session.child_sessions
+        self.assertEqual(scout.sid, f"{session.sid}:c1:0")
+        self.assertTrue(scout.is_subagent)
+        self.assertEqual(scout.parent_sid, session.sid)
+        self.assertEqual(scout.agent_type, "scout")
+        self.assertEqual(scout.cwd, session.cwd)
+        self.assertEqual(scout.end_state, "complete")
+        self.assertEqual(worker.end_state, "error-cascade")
+        self.assertEqual(worker.end_reason, "ran out of time")
+        self.assertEqual(session.dispatch_edges, [("c1", scout.sid), ("c1", worker.sid)])
+
+    def test_subagent_child_carries_its_own_messages_and_usage(self) -> None:
+        details = {"mode": "single", "results": [
+            fx.subagent_result("scout", "find the bug", "found it in foo.py"),
+        ]}
+        session = self.parse([
+            fx.header(),
+            fx.user_msg("e1", None, "delegate this"),
+            fx.assistant_msg("e2", "e1", [fx.tool_call_block(
+                "c1", "subagent", {"agent": "scout", "task": "find the bug"})]),
+            fx.tool_result_msg("e3", "e2", "c1", "subagent", "found it in foo.py",
+                               details=details),
+        ])
+        child = session.child_sessions[0]
+        self.assertEqual([m.role for m in child.messages], ["user", "assistant"])
+        self.assertEqual(child.tok_in, 200)
+        self.assertEqual(child.tok_out, 100)
+        self.assertAlmostEqual(child.cost_usd, 0.01)
+
+    # --- Review Focus: subagent toolResult without details/results ---------------------
+    def test_tool_result_named_subagent_without_details_produces_no_children(self) -> None:
+        session = self.parse([
+            fx.header(),
+            fx.user_msg("e1", None, "go"),
+            fx.assistant_msg("e2", "e1", [fx.tool_call_block(
+                "c1", "subagent", {"agent": "x", "task": "y"})]),
+            fx.tool_result_msg("e3", "e2", "c1", "subagent", "Canceled: not approved."),
+        ])
+        self.assertEqual(session.child_sessions, [])
+        self.assertEqual(session.dispatch_edges, [])
+        self.assertFalse(session.tools[0].is_error)
+
+    def test_tool_result_named_subagent_with_empty_results_produces_no_children(self) -> None:
+        session = self.parse([
+            fx.header(),
+            fx.user_msg("e1", None, "go"),
+            fx.assistant_msg("e2", "e1", [fx.tool_call_block("c1", "subagent", {})]),
+            fx.tool_result_msg("e3", "e2", "c1", "subagent", "Invalid parameters.",
+                               details={"mode": "single", "results": []}),
+        ])
+        self.assertEqual(session.child_sessions, [])

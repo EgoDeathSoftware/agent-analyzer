@@ -62,6 +62,17 @@ def _delta_ms(start: str, end: str) -> int | None:
     return int((b - a).total_seconds() * 1000)
 
 
+def _ms_to_iso(ms: Any) -> str:
+    """Convert a pi-ai `Message.timestamp` (Unix ms) to the ISO string every other `ts` field
+    in this module uses. Nested subagent messages carry this instead of an entry wrapper."""
+    from datetime import datetime, timezone
+
+    if not isinstance(ms, (int, float)):
+        return ""
+    return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).isoformat().replace(
+        "+00:00", "Z")
+
+
 class _Parser:
     """Accumulates one pi session file's entries into a ParsedSession."""
 
@@ -200,6 +211,13 @@ class _Parser:
         call.is_error = bool(msg.get("isError"))
         call.out_bytes = len(body)
         call.output_preview = preview(body, OUTPUT_PREVIEW)
+        if call.name == "subagent":
+            details = msg.get("details")
+            children = _subagent_children(
+                self.out.sid, self.out.source_id, self.out.path, self.out.cwd,
+                call, details if isinstance(details, dict) else {})
+            self.out.child_sessions.extend(children)
+            self.out.dispatch_edges.extend((call.tool_use_id, c.sid) for c in children)
 
     def _bash(self, line_no: int, ts: str, msg: dict[str, Any]) -> None:
         exit_code = msg.get("exitCode")
@@ -217,6 +235,62 @@ class _Parser:
         for call in self.pending.values():
             call.err_class = "no-result"
         return self.out
+
+
+def _subagent_children(parent_sid: str, source_id: str, path: str, parent_cwd: str,
+                       call: ToolCall, details: dict[str, Any]) -> list[ParsedSession]:
+    """Expand one closed `subagent` tool call's nested `details.results[]` into synthetic
+    child ParsedSessions (spec Sec 4).
+
+    Returns ``[]`` if `details` carries no results — covers both a non-subagent tool that
+    happens to be named "subagent" in some other extension and a subagent call that failed
+    before producing any result.
+    """
+    results = details.get("results") if isinstance(details, dict) else None
+    if not isinstance(results, list) or not results:
+        return []
+
+    children: list[ParsedSession] = []
+    for i, result in enumerate(results):
+        if not isinstance(result, dict):
+            continue
+        child_sid = f"{parent_sid}:{call.tool_use_id}:{i}"
+        child = ParsedSession(sid=child_sid, source_id=source_id, path=path, cwd=parent_cwd,
+                              is_subagent=True, parent_sid=parent_sid,
+                              agent_type=str(result.get("agent") or ""))
+        sub = _Parser(Path(path), source_id, child_sid, session=child)
+        for msg in result.get("messages") or []:
+            if not isinstance(msg, dict):
+                continue
+            role = msg.get("role")
+            ts = _ms_to_iso(msg.get("timestamp"))
+            if role == "user":
+                sub._user(0, ts, msg)
+            elif role == "assistant":
+                sub._assistant(0, ts, msg)
+            elif role == "toolResult":
+                sub._tool_result(0, ts, msg)
+            elif role == "bashExecution":
+                sub._bash(0, ts, msg)
+        sub.finish()
+
+        usage = result.get("usage") if isinstance(result.get("usage"), dict) else {}
+        child.tok_in = int(usage.get("input") or 0)
+        child.tok_out = int(usage.get("output") or 0)
+        child.tok_cache_read = int(usage.get("cacheRead") or 0)
+        child.tok_cache_create = int(usage.get("cacheWrite") or 0)
+        child.cost_usd = float(usage.get("cost") or 0.0)
+
+        exit_code = result.get("exitCode")
+        stop_reason = result.get("stopReason")
+        if exit_code == 0 and stop_reason not in ("error", "aborted"):
+            child.end_state, child.end_reason = "complete", ""
+        else:
+            child.end_state = "error-cascade"
+            child.end_reason = str(result.get("errorMessage") or result.get("stderr") or "")
+
+        children.append(child)
+    return children
 
 
 def parse_file(path: Path, source_id: str) -> ParsedSession:
