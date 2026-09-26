@@ -54,6 +54,11 @@ class Source:
         """Directory holding per-project transcript folders."""
         return self.root / "projects"
 
+    @property
+    def sessions_root(self) -> Path:
+        """Directory holding per-project session folders, for a pi source."""
+        return self.root / "sessions"
+
 
 def _read_env_file(path: Path) -> dict[str, str]:
     """Parse a ``KEY=value`` env file, ignoring comments and blanks."""
@@ -91,7 +96,7 @@ def load_env() -> dict[str, str]:
         if candidate.is_file():
             values.update(_read_env_file(candidate))
             break
-    for key in (*ENV_KEYS, "CLAUDE_DIR"):
+    for key in (*ENV_KEYS, "CLAUDE_DIR", "PI_DIR"):
         if key in os.environ:
             values[key] = os.environ[key]
     return values
@@ -106,6 +111,10 @@ def _probe(source: Source) -> Source:
         db = source.root / "opencode.db"
         source.reachable = db.is_file()
         source.note = "" if source.reachable else "no opencode.db"
+        return source
+    if source.kind == "pi":
+        source.reachable = source.sessions_root.is_dir()
+        source.note = "" if source.reachable else "no sessions/ subdirectory"
         return source
     if source.layout == "store-set":
         source.reachable = source.root.is_dir()
@@ -187,8 +196,13 @@ def _expand_store_set(parent: Source) -> list[Source]:
 def _candidates(env: dict[str, str]) -> list[Source]:
     """Build the unprobed candidate list from env configuration."""
     host_root = Path(env.get("CLAUDE_DIR") or Path.home() / ".claude").expanduser()
-    found = [Source(id="host", kind="claude-code", layout="single",
-                    location="host", root=host_root)]
+    pi_root = Path(env.get("PI_DIR") or Path.home() / ".pi" / "agent").expanduser()
+    found = [
+        Source(id="host", kind="claude-code", layout="single",
+               location="host", root=host_root),
+        Source(id="pi", kind="pi", layout="single",
+               location="host", root=pi_root),
+    ]
     for key, (sid, kind, layout) in ENV_KEYS.items():
         value = env.get(key)
         if value:
