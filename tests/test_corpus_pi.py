@@ -76,3 +76,23 @@ class PiCorpusTest(unittest.TestCase):
         self.assertEqual(len(loaded.sessions), 2, "parent + one synthetic subagent child")
         sids = {e.session.sid for e in loaded.sessions}
         self.assertIn(f"{fx.SID}:c1:0", sids)
+
+    def test_subagent_dispatch_resolves_through_children_rows(self) -> None:
+        details = {"mode": "single", "results": [
+            fx.subagent_result("scout", "find the bug", "found it in foo.py"),
+        ]}
+        fx.write(self.pi_home, [
+            fx.header(),
+            fx.user_msg("e1", None, "delegate this"),
+            fx.assistant_msg("e2", "e1", [fx.tool_call_block(
+                "c1", "subagent", {"agent": "scout", "task": "find the bug"})]),
+            fx.tool_result_msg("e3", "e2", "c1", "subagent", "found it in foo.py",
+                               details=details),
+        ])
+        loaded = corpus.load()
+        parent = query.find_session(loaded, fx.SID)
+        rows = query.children_rows(parent, loaded)
+        self.assertEqual(len(rows), 1)
+        self.assertTrue(rows[0]["resolved"])
+        self.assertEqual(rows[0]["agent_type"], "scout")
+        self.assertEqual(rows[0]["state"], "complete")

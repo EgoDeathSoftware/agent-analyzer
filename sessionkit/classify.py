@@ -335,7 +335,7 @@ def _agent_trouble(session: ParsedSession) -> list[Anomaly]:
     if kills:
         out.append(Anomaly("agent-kill", "subagent killed", len(kills), kills[:8]))
     orphans = [c.line for c in session.tools
-               if c.name == "Agent" and c.err_class == "no-result"]
+               if c.name in ("Agent", "subagent") and c.err_class == "no-result"]
     if orphans:
         out.append(Anomaly("orphan-subagent", "Agent spawned, never returned",
                            len(orphans), orphans[:8]))

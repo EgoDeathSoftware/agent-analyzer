@@ -763,7 +763,7 @@ def children_rows(entry: Loaded, corpus: Corpus) -> list[Row]:
     by_sid = {c.session.sid: c for c in corpus.sessions if c.session.is_subagent}
     out: list[Row] = []
     for tool in entry.session.tools:
-        if tool.name != "Agent":
+        if tool.name not in ("Agent", "subagent"):
             continue
         task_id = edges.get(tool.tool_use_id, "")
         child = by_sid.get(task_id) if task_id else None

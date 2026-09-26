@@ -235,6 +235,17 @@ class DetectorTest(unittest.TestCase):
         session.files.append(FileOp("/a.py", "read", "", "t", line=1))
         self.assertEqual(detect(session), [])
 
+    def test_orphan_pi_subagent_dispatch_detected(self) -> None:
+        session = _session(tools=[_call(1, name="subagent", err_class="no-result")])
+        anomalies = detect(session)
+        self.assertTrue(any(a.kind == "orphan-subagent" for a in anomalies))
+
+    def test_orphan_claude_code_agent_dispatch_still_detected(self) -> None:
+        # Regression: widening the check must not stop matching the original "Agent" name.
+        session = _session(tools=[_call(1, name="Agent", err_class="no-result")])
+        anomalies = detect(session)
+        self.assertTrue(any(a.kind == "orphan-subagent" for a in anomalies))
+
 
 class AnnotateTest(unittest.TestCase):
     """annotate_errors fills classes in place."""
