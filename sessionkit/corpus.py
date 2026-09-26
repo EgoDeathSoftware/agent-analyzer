@@ -20,6 +20,7 @@ import hashlib
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from sessionkit import parse_pi
 from sessionkit import sources as src
 from sessionkit.classify import Anomaly, annotate_errors, derive_end_state, detect
 from sessionkit.parse import ParsedSession, parse_file, project_key
@@ -57,14 +58,16 @@ class Corpus:
 
 
 def transcripts(source: src.Source) -> list[tuple[Path, str]]:
-    """Every ``.jsonl`` transcript under a source, paired with its project directory name.
+    """Every session transcript under a source, paired with its project directory name.
 
-    Two layouts exist and both must be walked. Top-level sessions live at
-    ``projects/<project>/<session>.jsonl``; **subagent** transcripts live one level deeper at
-    ``projects/<project>/<parent-session>/subagents/agent-*.jsonl`` — 36 of this corpus's 87
-    files. Globbing only the top level silently drops every subagent, which would leave
-    delegation analysis with nothing to measure.
+    Claude Code / opencode use `projects/<project>/<session>.jsonl`, with subagent transcripts
+    one level deeper at `projects/<project>/<parent-session>/subagents/agent-*.jsonl`. pi has
+    no `projects/` indirection at all: `sessions/<project>/<file>.jsonl` directly, and no
+    separate subagent glob — nested subagent conversations are inline (see parse_pi.py).
     """
+    if source.kind == "pi":
+        return _pi_transcripts(source)
+
     found: list[tuple[Path, str]] = []
     root = source.projects_dir
     if not root.is_dir():
@@ -83,12 +86,48 @@ def transcripts(source: src.Source) -> list[tuple[Path, str]]:
     return found
 
 
-def load_one(source: src.Source, path: Path, dir_name: str) -> Loaded:
+def _pi_transcripts(source: src.Source) -> list[tuple[Path, str]]:
+    """Every ``.jsonl`` session under a pi source, paired with its project directory name."""
+    found: list[tuple[Path, str]] = []
+    root = source.sessions_root
+    if not root.is_dir():
+        return found
+    try:
+        entries = sorted(p for p in root.iterdir() if p.is_dir())
+    except OSError:
+        return found
+    for project_dir in entries:
+        try:
+            files = sorted(project_dir.glob("*.jsonl"))
+        except OSError:
+            continue
+        found.extend((f, project_dir.name) for f in files)
+    return found
+
+
+def load_one(source: src.Source, path: Path, dir_name: str) -> list[Loaded]:
     """Parse one transcript and derive everything the reports need from it.
 
-    The order matters: errors must be classified before ``derive_end_state`` reads them, and
-    both must run before :func:`~sessionkit.classify.detect` looks for anomalies.
+    Returns one `Loaded` for a Claude Code/opencode transcript, or one `Loaded` for a pi
+    session plus one more per synthetic subagent child its `subagent` tool calls produced
+    (parse_pi.py, spec Sec 4) — always at least one entry.
     """
+    if source.kind == "pi":
+        parent = parse_pi.parse_file(path, source.id)
+        annotate_errors(parent)
+        parent.end_state, parent.end_reason = derive_end_state(parent)
+        loaded = [Loaded(parent, project_key(parent.cwd, source.id, dir_name),
+                         detect(parent))]
+        for child in parent.child_sessions:
+            annotate_errors(child)
+            # end_state/end_reason were already assigned in parse_pi from the subagent
+            # result's exitCode/stopReason (spec Sec 4) — derive_end_state assumes a live
+            # tail of tool calls a synthetic child, built from an already-finished
+            # subprocess, does not have.
+            loaded.append(Loaded(child, project_key(child.cwd, source.id, dir_name),
+                                 detect(child)))
+        return loaded
+
     session = parse_file(path, source.id)
     if source.location == "container":
         session.cwd = src.rewrite_cwd(session.cwd, source.origin)
@@ -98,7 +137,7 @@ def load_one(source: src.Source, path: Path, dir_name: str) -> Loaded:
     # tail_signal is left unset here: query.tail_signal() memoises onto the session on first
     # real use, and only `sk tail`/`sk files` ever ask for it — every other command paid for
     # a re-read of each session's last 6 lines from disk for nothing.
-    return Loaded(session, project_key(session.cwd, source.id, dir_name), anomalies)
+    return [Loaded(session, project_key(session.cwd, source.id, dir_name), anomalies)]
 
 
 def _disambiguate(sessions: list[Loaded]) -> None:
@@ -126,31 +165,28 @@ def _disambiguate(sessions: list[Loaded]) -> None:
 def load_session(prefix: str) -> Loaded | None:
     """Parse only the transcripts whose *filename* could hold this session id.
 
-    ``sk show`` needs one session, and parsing the whole corpus to find it costs ~1.1 s against
-    ~0.2 s for the file itself. A session id is normally the transcript's filename (or, for a
-    subagent, the filename minus its ``agent-`` prefix), so candidates can be picked off disk
-    without reading them.
-
-    That mapping is a convention, not a guarantee — the id inside the file wins, and two files
-    in this corpus share one. So every candidate is verified after parsing and a mismatch
-    returns ``None``, which the caller must treat as "fall back to a full :func:`load`".
-    Being wrong here would silently show the wrong session, so the fast path is only ever
-    allowed to *confirm* a hit, never to rule one out.
+    pi's filenames (`<timestamp>_<uuid>.jsonl`) don't share a prefix with either the header's
+    session id or a synthetic child's `<sid>:<call_id>:<i>` id, so the filename pre-filter that
+    speeds this up for Claude Code is skipped for pi sources — every pi file is parsed and
+    checked. Acceptable for now (spec Sec 9); revisit if `sk show` proves slow on a large pi
+    corpus.
     """
     needle = prefix.lower()
     found: list[Loaded] = []
     for source in src.scannable(src.discover()):
         for path, dir_name in transcripts(source):
-            stem = path.stem
-            candidate = stem[6:] if stem.startswith("agent-") else stem
-            if not candidate.lower().startswith(needle):
-                continue
+            if source.kind != "pi":
+                stem = path.stem
+                candidate = stem[6:] if stem.startswith("agent-") else stem
+                if not candidate.lower().startswith(needle):
+                    continue
             try:
-                entry = load_one(source, path, dir_name)
+                entries = load_one(source, path, dir_name)
             except OSError:
                 continue
-            if entry.session.sid.lower().startswith(needle):
-                found.append(entry)
+            for entry in entries:
+                if entry.session.sid.lower().startswith(needle):
+                    found.append(entry)
     if not found:
         return None
     return max(found, key=lambda e: e.session.ended_at or "")
@@ -173,7 +209,7 @@ def load(only: str | None = None) -> Corpus:
             continue
         for path, dir_name in transcripts(source):
             try:
-                corpus.sessions.append(load_one(source, path, dir_name))
+                corpus.sessions.extend(load_one(source, path, dir_name))
             except OSError:
                 corpus.failed += 1
     _disambiguate(corpus.sessions)

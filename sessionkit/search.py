@@ -194,7 +194,10 @@ def search_rows(sources: list[Source], scope: query.Filter, pattern: re.Pattern[
                             file_hits[0].raw_line)]
         else:
             try:
-                entry = corpus.load_one(source, Path(path), file_hits[0].dir_name)
+                # [0]: a grep hit always names one Claude Code/opencode transcript file, which
+                # load_one never expands into more than one Loaded — the list return only
+                # holds more than one entry for a pi source's synthetic subagent children.
+                entry = corpus.load_one(source, Path(path), file_hits[0].dir_name)[0]
             except OSError:
                 continue
             resolved = file_hits
@@ -250,7 +253,9 @@ def _resolve_spill_hit(hit: Hit, source: Source) -> tuple[Loaded | None, int]:
     if not transcript_path.is_file():
         return None, 0
     try:
-        entry = corpus.load_one(source, transcript_path, hit.dir_name)
+        # [0]: a tool-results spill only exists for a Claude Code/opencode transcript, which
+        # load_one never expands into more than one Loaded.
+        entry = corpus.load_one(source, transcript_path, hit.dir_name)[0]
     except OSError:
         return None, 0
     tool_use_id = Path(hit.path).stem
