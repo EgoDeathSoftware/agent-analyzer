@@ -176,6 +176,9 @@ class _Parser:
                                     model=model, tok_in=tok_in, tok_out=tok_out, tok_cr=tok_cr,
                                     tok_cc=tok_cc, text_len=len(text),
                                     preview=preview(text, MSG_PREVIEW)))
+        if msg.get("stopReason") == "error":
+            out.sysev.append(SysEvent(line_no, ts, "api_error",
+                                      preview(str(msg.get("errorMessage") or ""), 120)))
         if isinstance(content, list):
             for block in content:
                 if isinstance(block, dict) and block.get("type") == "toolCall":

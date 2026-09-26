@@ -156,6 +156,17 @@ class ParsePiTest(unittest.TestCase):
         session = parse_file(path, "pi")
         self.assertEqual(session.malformed_lines, 1)
 
+    def test_assistant_error_stop_recorded_as_sysevent(self) -> None:
+        session = self.parse(fx.api_error_session())
+        errors = [e for e in session.sysev if e.subtype == "api_error"]
+        self.assertEqual(len(errors), 1)
+        self.assertEqual(errors[0].line, 3)
+        self.assertIn("Refresh token expired", errors[0].detail)
+
+    def test_normal_assistant_stop_records_no_api_error(self) -> None:
+        session = self.parse(fx.simple_session())
+        self.assertFalse([e for e in session.sysev if e.subtype == "api_error"])
+
 
 class ParsePiSubagentTest(unittest.TestCase):
     """Nested subagent tool-result expansion into synthetic child sessions — spec Sec 4."""

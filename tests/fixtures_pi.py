@@ -32,16 +32,35 @@ def user_msg(entry_id: str, parent_id: str | None, text: str,
 
 def assistant_msg(entry_id: str, parent_id: str | None, content: list[dict[str, Any]],
                   ts: str = "2026-09-01T00:00:02.000Z", model: str = "claude-sonnet-5",
-                  usage: dict[str, Any] | None = None, stop_reason: str = "stop"
-                  ) -> dict[str, Any]:
-    return _entry("message", entry_id, parent_id, ts, message={
+                  usage: dict[str, Any] | None = None, stop_reason: str = "stop",
+                  error_message: str = "") -> dict[str, Any]:
+    msg: dict[str, Any] = {
         "role": "assistant", "content": content, "provider": "anthropic", "model": model,
         "usage": usage or {"input": 100, "output": 50, "cacheRead": 0, "cacheWrite": 0,
                            "totalTokens": 150,
                            "cost": {"input": 0.001, "output": 0.001, "cacheRead": 0.0,
                                     "cacheWrite": 0.0, "total": 0.002}},
         "stopReason": stop_reason,
-    })
+    }
+    if error_message:
+        msg["errorMessage"] = error_message
+    return _entry("message", entry_id, parent_id, ts, message=msg)
+
+
+def api_error_session() -> list[dict[str, Any]]:
+    """header -> user -> assistant that failed before producing content.
+
+    Shape copied from a real pi 0.84 session whose provider auth failed: empty content,
+    zero usage, ``stopReason: "error"`` and the provider's message in ``errorMessage``.
+    """
+    zero_usage = {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 0,
+                  "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0}}
+    return [
+        header(),
+        user_msg("e1", None, "list the files"),
+        assistant_msg("e2", "e1", [], usage=zero_usage, stop_reason="error",
+                      error_message="OAuth refresh failed for anthropic: Refresh token expired"),
+    ]
 
 
 def tool_call_block(call_id: str, name: str, arguments: dict[str, Any]) -> dict[str, Any]:

@@ -39,6 +39,12 @@ class PiCorpusTest(unittest.TestCase):
         self.assertEqual(loaded.sessions[0].session.source_id, "pi")
         self.assertEqual(loaded.failed, 0)
 
+    def test_session_ending_on_api_error_is_not_complete(self) -> None:
+        fx.write(self.pi_home, fx.api_error_session())
+        session = corpus.load().sessions[0].session
+        self.assertEqual(session.end_state, "error-cascade")
+        self.assertIn("Refresh token expired", session.end_reason)
+
     def test_doctor_reports_pi_source(self) -> None:
         fx.write(self.pi_home, fx.simple_session())
         loaded = corpus.load()

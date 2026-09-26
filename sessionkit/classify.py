@@ -12,7 +12,7 @@ import re
 from dataclasses import dataclass
 from typing import Callable
 
-from sessionkit.parse import ParsedSession, ToolCall
+from sessionkit.parse import ParsedSession, SysEvent, ToolCall
 
 #: All tuneable detector limits in one place rather than scattered as literals.
 THRESHOLDS = {
@@ -177,6 +177,15 @@ def annotate_errors(session: ParsedSession) -> None:
         call.err_detail = signature(call.output_preview)
 
 
+def _final_api_error(session: ParsedSession) -> SysEvent | None:
+    """The ``api_error`` event raised by the session's last message, if that turn failed."""
+    last_line = session.messages[-1].line
+    for event in reversed(session.sysev):
+        if event.subtype == "api_error" and event.line == last_line:
+            return event
+    return None
+
+
 def derive_end_state(session: ParsedSession) -> tuple[str, str]:
     """Decide how a session ended, and why.
 
@@ -194,6 +203,9 @@ def derive_end_state(session: ParsedSession) -> tuple[str, str]:
     if _trailing_errors(session.tools) >= THRESHOLDS["error_cascade"]:
         return ("error-cascade", "session ends on consecutive failing tool calls")
     if session.messages and session.messages[-1].role == "assistant":
+        api_error = _final_api_error(session)
+        if api_error is not None:
+            return ("error-cascade", api_error.detail or "final model turn ended in an API error")
         if any(e.subtype == "compact_boundary" for e in session.sysev[-5:]):
             return ("compacted-idle", "went idle shortly after a context compaction")
         return ("complete", "")
