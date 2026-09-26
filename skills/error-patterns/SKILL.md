@@ -1,12 +1,12 @@
 ---
 name: error-patterns
-description: Find recurring tool failures across ALL Claude Code sessions on this machine and propose concrete fixes (CLAUDE.md rules, hook changes, missing tools). Use when asked why sessions keep failing, what keeps breaking, which errors repeat, or for a periodic health check of the session fleet. Triggers on "what keeps failing", "recurring errors", "why do my sessions error", "error patterns", "session health check". NOT for reviewing a single session's failure — use session-forensics for that.
+description: Find recurring tool failures across ALL coding-agent sessions on this machine (Claude Code, pi, and any other reachable source) and propose concrete fixes (CLAUDE.md rules, hook changes, missing tools). Use when asked why sessions keep failing, what keeps breaking, which errors repeat, or for a periodic health check of the session fleet. Triggers on "what keeps failing", "recurring errors", "why do my sessions error", "error patterns", "session health check". NOT for reviewing a single session's failure — use session-forensics for that.
 ---
 
 # Error Patterns
 
-Cluster every failed tool call across every reachable Claude Code session and turn the top
-clusters into fixes.
+Cluster every failed tool call across every reachable coding-agent session — Claude Code, pi,
+and any other source `sk` can see — and turn the top clusters into fixes.
 
 This is a **fleet-wide, read-only** analysis. It never edits CLAUDE.md, hooks, or settings — it
 proposes changes and the user applies them.

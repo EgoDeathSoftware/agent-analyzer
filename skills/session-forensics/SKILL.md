@@ -1,13 +1,14 @@
 ---
 name: session-forensics
-description: Diagnose why ONE Claude Code session went wrong — looped, stalled, killed a subagent, or ended interrupted — and what actually ran during it. Use when asked why a specific session failed, looped, stalled, or produced a bad result, or to review what commands/tools an agent (including a subagent) actually invoked. Triggers on "why did this session fail", "why did it loop", "what did that agent actually run", "review this session". NOT for a fleet-wide question about what keeps failing across many sessions — use error-patterns for that.
+description: Diagnose why ONE coding-agent session (Claude Code, pi, or any other reachable source) went wrong — looped, stalled, killed a subagent, or ended interrupted — and what actually ran during it. Use when asked why a specific session failed, looped, stalled, or produced a bad result, or to review what commands/tools an agent (including a subagent) actually invoked. Triggers on "why did this session fail", "why did it loop", "what did that agent actually run", "review this session". NOT for a fleet-wide question about what keeps failing across many sessions — use error-patterns for that.
 ---
 
 # Session Forensics
 
-Diagnose a single Claude Code session (or subagent) using `sk forensics` and `sk commands`. This
-is a **single-session, read-only** analysis — it names what went wrong, cites the exact lines,
-and ends with a prevention hint, never a rewritten narrative of the transcript.
+Diagnose a single coding-agent session (or subagent) — from Claude Code, pi, or any other
+reachable source — using `sk forensics` and `sk commands`. This is a **single-session,
+read-only** analysis — it names what went wrong, cites the exact lines, and ends with a
+prevention hint, never a rewritten narrative of the transcript.
 
 ## Boundaries with neighbouring skills
 
