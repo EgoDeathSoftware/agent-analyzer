@@ -1,7 +1,7 @@
 # Agent Post-Mortem Analysis — Design
 
 Status: **written spec, awaiting review.** Sections 1–6 were approved in brainstorming on
-2026-09-27.
+2026-09-27, and revised after a manual dry run against two real failed pi sessions (§A.4).
 
 ## 1. Goal and scope
 
@@ -15,7 +15,8 @@ open-model agents running on local vLLM.
 **In scope**
 - A failure taxonomy (§2).
 - A restructured detection layer (§3).
-- Additive data-model fields populated by both parsers (§4).
+- Additive data-model fields populated by both parsers (§4), and parsing of pi-subagents
+  async child runs (§4.1).
 - `sk forensics` becomes the post-mortem report, a new `sk findings` fleet view, and small
   CLI additions (§5).
 - A post-mortem procedure in `session-forensics` with a failure-class knowledge base, and
@@ -75,7 +76,7 @@ generic classes stay error-only, as today.
 | `tool-error-structured` | body starts with `{"ok": false` | environment | env |
 | `policy-denied` | widen: `File is in a directory that is denied by your permission`, worktree-isolation blocks (`This session is isolated in the worktree`), pi `Tool execution was blocked` | environment | harness |
 | `user-rejected` | widen: `The user doesn't want to take this action` | environment | — |
-| `api-error` / `context-overflow` / `auth` / `rate-limit` / `network` | classified from `Message.error_text` (§4): overflow (`maximum context length`, `context length exceeded`, pi `Context overflow recovery failed`); auth (`invalid_grant`, `OAuth`, `401`, `403`); network (`ECONNREFUSED`, `fetch failed`, DNS); `Provider finish_reason:` becomes `api-error` | environment | env / harness |
+| `api-error` / `context-overflow` / `auth` / `rate-limit` / `network` | classified from `Message.error_text` (§4): overflow (`maximum context length`, `context length exceeded`, pi `Context overflow recovery failed`); auth (`invalid_grant`, `OAuth`, `401`, `403`); network (`ECONNREFUSED`, `fetch failed`, DNS); `Provider finish_reason:` becomes `api-error`. The `context-overflow` hint names the harness fix first: the model's `maxTokens` output reservation eats into the context window (32,768 reserved on a 131,072 window leaves 98K for the conversation) | environment | env / harness |
 
 ### 2.2 Finding kinds
 
@@ -83,7 +84,8 @@ generic classes stay error-only, as today.
 |---|---|---|---|---|
 | `tool-text-leak` | assistant message with `markup_leak != ""` and `tool_calls == 0` | S | tool protocol | serving / model |
 | `empty-turn` | assistant message with `stop_reason == "end"`, `tool_calls == 0`, no visible text | S | generation | model / sampling |
-| `degeneration` | assistant message with `repeat_ratio ≥ 0.5` (see §4) | S | generation | serving (sampling) |
+| `degeneration` | assistant message with `repeat_ratio ≥ 0.5` (see §4), **including aborted and errored messages**, since a runaway reasoning loop is usually ended by an abort and records 0 output tokens | S | generation | serving (sampling) |
+| `generation-stall` | an assistant message whose latency (time since the previous entry) exceeds 10 minutes **and** 5× the session's median assistant latency. It catches thinking loops even when no content was saved, and does not fire on a uniformly slow model | S | generation | model / serving |
 | `output-truncated` | assistant message with `stop_reason == "length"` (in addition to the error class) | S | generation | harness |
 | `repeat-tool` | identical `(tool, input)` ≥ 3; calls with role `poll` are exempt | S | loop | model |
 | `edit-mismatch-spiral` | ≥ 3 `edit-mismatch` failures on the same path | S | loop | model |
@@ -91,16 +93,18 @@ generic classes stay error-only, as today.
 | `file-thrash` | **retuned**: ≥ 8 edits to one path, or ≥ 5 edits of which ≥ 2 failed | S | loop | model |
 | `read-loop` | **retuned**: ≥ 5 reads of one path, not counting reads that follow a compaction or an edit of that path | S | loop | model |
 | `error-cascade`, `hook-pingpong`, `rejection-persist`, `agent-kill`, `orphan-subagent`, `compaction-churn` | unchanged, except `sibling-cascade` is excluded from runs, the compaction check uses the normalized `compaction` subtype, and the subagent check uses role `dispatch` | S | loop / lifecycle | as today |
-| `stall` | **fixed**: roles `ask-user`, `dispatch`, `poll`, `edit`, `write` are excluded (their duration includes human approval or background work); `exec` fires at > 600 s; everything else at > 120 s | S | lifecycle | env |
+| `stall` | **fixed**: roles `ask-user`, `dispatch`, `poll`, `edit`, `write` are excluded (their duration includes human approval or background work); `exec` fires at > 600 s **only if the call declared no timeout**; a call with a declared timeout fires only when it runs to ≥ 90% of it (a long benchmark with an explicit timeout is deliberate); everything else at > 120 s | S | lifecycle | env |
 | `hung` | not live, and either the end state is `interrupted-tool` on a call whose role is not `ask-user` or `dispatch`, or the last assistant message has `stop_reason == ""` (the stream never finished) | S | lifecycle | env / harness |
 | `abrupt-truncation` | `last_line_malformed` and not live | S | lifecycle | — |
+| `user-interrupt` | an aborted assistant turn (or `aborted` tool result) followed by a new user message. The user's redirect is the strongest available drift signal: the run of calls before the interrupt becomes a `drift-candidate` even when the ask had no refs (§3.4) | S | lifecycle | — |
+| `resource-interference` | the session's API errors or timeouts fall inside the time window of a long-running `exec` call in a concurrent child or sibling session from the same project (e.g. a child benchmark swapping models on the server the parent runs on). Needs child sessions linked (§4.1) | S→J | environment | harness / env |
 | `error-ignored` | a failed tool result, followed by an assistant message whose visible text matches the completion regex, with no retry of that tool before it | S→J | recovery | model |
 | `give-up` | the final tool call failed and was not part of a cascade, and the session then ends with no further tool call, tail signal `apology` or `neutral` | S→J | recovery | model |
 | `unverified-completion` | final visible text is a completion claim, the session made edits, and no `exec` call matching `VERIFY_COMMANDS` (pytest, unittest, `npm/pnpm test`, `cargo test`, `go test`, `make`, `tsc`, `ruff`, `ty`, `vitest`; the full list lives in `harness.py`) ran after the last edit | S→J | alignment | harness |
 | `premature-stop` | end state `complete`, tail signal `next_step_stated`, no later user message | S→J | alignment | model |
 | `scope-creep` | the governing ask matches review/explain verbs (`review`, `explain`, `analyze`, `don't change`, `read-only`; the full lists live in `alignment.py`) and no implement verbs (`fix`, `implement`, `add`, `change`, `refactor`, `update`, `write`), yet the turn has `edit`/`write` operations | S→J | alignment | harness |
 | `drift-candidate` | focus profile (§3.4): an off-reference run holding ≥ 40% of the turn's calls and ≥ 8 calls | S→J | alignment | harness / model |
-| `false-premise`, `spec-neglect`, `misread-output` | no structural signal; the skill's judgment checklist (§6) | J | alignment | model / harness |
+| `false-premise`, `spec-neglect`, `misread-output`, `ignored-own-warning`, `role-drift` | no structural signal; the skill's judgment checklist (§6). `ignored-own-warning`: the agent stated a hazard or constraint, then acted against it. `role-drift`: an orchestrator does its delegate's work in parallel with it | J | alignment | model / harness |
 
 The J-tier kinds exist in the taxonomy, so they carry hints and reference entries, but no
 detector ever emits them.
@@ -153,9 +157,14 @@ The detectors are pure functions `(ParsedSession) -> list[Anomaly]`, one module 
   `live.live_sids`, so detectors do no I/O.
 
 `classify.py` keeps `annotate_errors`, `derive_end_state` and `derive_tail_signal`.
-`derive_end_state` gains `aborted` (final assistant `stop_reason == "aborted"`) and
-`output-truncated` (final assistant `stop_reason == "length"`), and uses
-`stop_reason == "error"` instead of the `api_error` sysevent.
+`derive_end_state` gains:
+- `aborted`: final assistant `stop_reason == "aborted"`.
+- `output-truncated`: final assistant `stop_reason == "length"`.
+- `agent-unresponsive`: the session ends on a user message that follows one or more
+  errored or aborted assistant turns. Today this reads as `interrupted-user`, which blames
+  the user when the agent was the one that stopped answering.
+
+It uses `stop_reason == "error"` instead of the `api_error` sysevent.
 
 ### 3.4 Focus profile (`detectors/alignment.py`)
 
@@ -166,8 +175,11 @@ The detectors are pure functions `(ParsedSession) -> list[Anomaly]`, one module 
    family for `exec`).
 3. A run is **referenced** if any target shares a path component or basename with the ask's
    `refs`, or sits in a directory the turn has already touched through a referenced target.
-4. **Asks with no refs produce no drift candidates.** Without references `sk` cannot judge
-   relevance, so the skill checks those turns itself.
+4. **Asks with no refs produce no ref-based drift candidates.** Without references `sk`
+   cannot judge relevance, so the skill checks those turns itself.
+5. **A `user-interrupt` always produces a drift candidate** for the run of calls before it,
+   refs or not, because the user stopping the agent and redirecting it is direct evidence
+   that the work had gone off course.
 
 `query.focus_profile(entry)` exposes the per-turn structure (ask preview, refs, runs with
 their share and `referenced` flag) for `sk forensics`.
@@ -195,7 +207,7 @@ extract the same features:
 | `reasoning_len` | length of the reasoning text. `text_len` and `preview` become **visible text only** (this fixes reasoning being merged into the visible text in both parsers) |
 | `error_text` | preview of pi's `errorMessage` or CC's API-error text; replaces the `api_error` sysevent |
 | `markup_leak` | scanned over the full visible and reasoning text |
-| `repeat_ratio` | computed over the full visible and reasoning text |
+| `repeat_ratio` | computed over the full visible and reasoning text, for every assistant message regardless of stop reason |
 | `refs` | user messages only |
 
 **`ParsedSession`**
@@ -206,7 +218,27 @@ extract the same features:
 | `last_line_malformed` | the final non-empty line failed to decode |
 
 **Normalized sysevent subtypes.** Both CC `compact_boundary` and pi `compaction` become
-`compaction`. pi's compaction `usage` cost is added to the session totals.
+`compaction`. pi's compaction `usage` cost is added to the session totals. pi's
+`context_edit` entries (seen in real sessions, absent from the 0.84.1 docs) become a
+`context_edit` sysevent instead of counting as malformed lines.
+
+### 4.1 pi-subagents async child runs
+
+The `pi-subagents` extension's async dispatch writes each child run as an ordinary pi session
+file in a folder beside the parent: `<parent-stem>/<folder-id>/run-<n>/session.jsonl`. It
+also writes `subagent-artifacts/<runId>_<agent>_meta.json`, which carries `runId`, `agent`,
+`model`, `exitCode` and `usage`. The corpus currently reads only top-level `.jsonl` files,
+so these children are invisible (a 2.5-hour, 1.9M-token child in the dry run).
+
+- Corpus discovery also loads `*/*/run-*/session.jsonl` under a pi project folder, parsed
+  with the normal pi parser.
+- The child's `session_info` name has the form `subagent-<agent>-<runId>-…`. That `runId`
+  joins to the meta file (agent type, exit code, usage) and to the parent's `subagent`
+  tool result, which names it as `Async: <agent> [<runId>]`.
+- The child is marked `is_subagent`, with `parent_sid` set from the enclosing folder's
+  session id, and a `dispatch_edges` entry from the parent's tool call.
+- `subagent-artifacts/*_transcript.jsonl` uses the extension's own record format and
+  duplicates the run file, so it is not parsed.
 
 ## 5. CLI
 
@@ -220,7 +252,9 @@ extract the same features:
   other turns get one line each.
 - **Timeline:** unchanged; only the lines findings cite.
 - **Health:** the existing tool-call metrics, plus stop-reason counts, empty turns,
-  reasoning-to-visible ratio and compactions.
+  reasoning-to-visible ratio, compactions, and **median assistant turn latency**. A
+  uniformly slow model is a finding in itself, and `sk findings --group-by model` makes
+  latency comparable across models.
 
 **`sk findings`** (new) is the fleet aggregation of detector findings.
 - `--group-by kind|model|harness|project|session`.
@@ -253,7 +287,12 @@ procedure:
      assumption.
    - **Spec neglect:** the ask's requirements, each marked done or not done.
    - **Misread output:** a tool result that contradicts the next action.
-   - For asks without refs, a drift check by reading the turn.
+   - **Ignored own warning:** a hazard or constraint the agent itself stated, then acted
+     against.
+   - **Role drift:** in orchestrated sessions, the controller doing its delegate's work.
+   - For asks without refs and no `user-interrupt`, a drift check by reading the turn.
+   - For `resource-interference` candidates, read the linked child's calls in the overlap
+     window to confirm they touched the shared resource.
 5. **Decisive error:** the earliest step after which failure was inevitable. Cite it
    separately from the line where the failure surfaced.
 6. **Prescribe fixes by target**, per harness:
@@ -314,18 +353,23 @@ fixes per harness. It is loaded only for the classes a report actually contains.
    truncation, and a qwen long-context leak attempt. The truncation run needs a low
    `maxTokens` model entry in `~/.pi/agent/models.json`, added only with the user's approval.
    Any surprises are folded back into the fixtures.
+7. **Dry-run regression.** Running `sk forensics` on the two sessions in §A.4 must produce
+   the findings listed there. This is a manual acceptance check against the real files in
+   `test/`, not a unit test; the unit tests reproduce each shape with inline fixtures.
 
 ## 8. Implementation phases
 
 1. **Refactor:** taxonomy, harness and detectors modules, with no behavior change (§7.1).
 2. **Data model and parser fixes:** the `features.py` fields in §4, the normalized sysevents
-   and the `stop_reason` mapping. This fixes the known pi and CC bugs listed below.
+   (including `context_edit`), the `stop_reason` mapping, and pi-subagents child runs
+   (§4.1). This fixes the known pi and CC bugs listed below.
 3. **Taxonomy extension:** the §2.1 error classes.
 4. **New and retuned detectors** (§2.2), including the focus profile.
 5. **CLI:** `sk forensics` sections, `sk findings`, and the `errors`/`index` additions.
 6. **Skills:** the `session-forensics` procedure, `reference/failure-classes.md` and the
    `error-patterns` updates.
-7. **Validation:** corpus acceptance (§7.5) and the real pi sessions (§7.6).
+7. **Validation:** corpus acceptance (§7.5), the real pi sessions (§7.6) and the dry-run
+   regression (§7.7).
 
 **Known bugs fixed in phase 2 or 3** (phase 3 fixes the exit-code pattern):
 - **pi bash failures are unclassified.** The exit status sits at the end of the output.
@@ -336,6 +380,8 @@ fixes per harness. It is loaded only for the classes a report actually contains.
   `complete`.
 - **API errors are never classified.** CC API errors are not recorded at all.
 - **pi compaction cost is missing** from the session totals.
+- **pi-subagents async children are invisible** to the corpus.
+- **pi `context_edit` entries count as malformed lines.**
 
 ## Appendix A: evidence
 
@@ -382,7 +428,8 @@ fixes per harness. It is loaded only for the classes a report actually contains.
     sibling-errored, and 10 were misclassified permission denials.
   - Tool-calling problems made up 8.5% of failures.
   - The largest tail-signal bucket was `neutral`, with 491 sessions.
-- **pi:** the sessions show no failures beyond OAuth errors.
+- **pi (local store):** the sessions show no failures beyond OAuth errors. The real pi
+  failures came from the sessions in `test/` (§A.4).
 - **codex**, for its future spec: 43 sessions, all on OpenAI models.
   - The format is rollout JSONL (`session_meta`, `turn_context`, `response_item`,
     `event_msg`).
@@ -390,3 +437,37 @@ fixes per harness. It is loaded only for the classes a report actually contains.
   - There were 17 `turn_aborted` events.
   - `wait_agent` polling loops (one session repeated one call 65 times) call for a `poll`
     role.
+
+### A.4 Dry run (2026-09-27): two real failed pi sessions
+
+Current `sk` reported **zero findings** for both.
+
+**`01a0db1d` (`test/pi-prana`, qwen3.8-27b on prana):** subagent-driven development of a
+benchmark harness whose Task 1 swaps models on llama-swap, the server the agent itself runs
+on.
+- The orchestrator noted this hazard (lines 40, 51), then kept making model calls while its
+  async child ran a 41-minute benchmark window (02:00–02:41).
+- Its request timed out at 02:05 (line 79), and its next turn hung until the user aborted
+  it at 02:11 (line 83).
+- The user's "tell me whats happening" (line 84) got no reply. Current `sk` reported this as
+  `interrupted-user`.
+- Earlier, a context overflow (line 57: a 98K prompt plus 32K reserved output exceeded the
+  131K window) was recovered by compaction.
+- After the watchdog notice (line 65), the orchestrator debugged the child's crash in
+  parallel with the child (lines 68–81).
+- The child ran to 03:44 (38 turns, 1.9M input tokens) and is invisible to the corpus.
+- **Expected findings:** `context-overflow`, `api-error`/timeout, end state
+  `agent-unresponsive`, `resource-interference` (candidate), linked child session;
+  J checklist: `ignored-own-warning` (decisive error), `role-drift`. The child's three long
+  benchmark calls declared timeouts, so there are **no** `stall` findings.
+
+**`01a0db2c` (`test/pi-mother`, Qwen3.8-27B MLX 4-bit, local):** profile-switching config
+task.
+- A 13-minute detour grepping pi's package source (lines 19–32) ended when the user
+  interrupted it (line 33) and redirected.
+- The final turn (line 60) ran 18 minutes and produced 40,689 characters of reasoning and no
+  output: the same six-sentence plan restated about 24 times (8-gram `repeat_ratio` 0.854,
+  about 0.42 in the first quarter and 0.85 afterwards). The user aborted it.
+- Median turn latency was about 2.5 minutes.
+- **Expected findings:** `degeneration` and `generation-stall` on line 60, end state
+  `aborted`, `user-interrupt` at line 33 with a `drift-candidate` for lines 19–32.
