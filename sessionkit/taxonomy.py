@@ -89,7 +89,7 @@ ERROR_CLASSES: tuple[FailureClass, ...] = (
            r"permission for this action was denied|"
            r"permission to use \w+.{0,200}?has been denied|"
            r"File is in a directory that is denied by your permission|"
-           r"Tool execution was blocked",
+           r"This session is isolated in the worktree|Tool execution was blocked",
            flags=re.I | re.S),
     _error("tool-error-structured", "environment", "env",
            'A tool returned a structured failure ({"ok": false}) — read its errors list; the '
@@ -130,7 +130,8 @@ ERROR_CLASSES: tuple[FailureClass, ...] = (
            r"Sibling tool call errored"),
     _error("aborted", "lifecycle", "none",
            "The user stopped this call or turn.",
-           r"\[Request interrupted by user|Operation aborted|Command aborted"),
+           # pi's abort status is the body's last line; mid-body it is a stack-trace detail.
+           r"\[Request interrupted by user", r"\b(?:Operation|Command) aborted\s*$"),
     _error("file-too-large", "tool-protocol", "model",
            "Read with offset/limit, or use Grep instead of a full read.",
            r"exceeds maximum allowed tokens"),

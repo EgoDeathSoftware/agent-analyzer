@@ -69,6 +69,12 @@ class ErrorClassTest(unittest.TestCase):
         ("Sibling tool call errored", "sibling-cascade"),
         ("[Request interrupted by user for tool use]", "aborted"),
         ("partial output\n\nCommand aborted", "aborted"),
+        ("partial output Command aborted", "aborted"),
+        ("Operation aborted", "aborted"),
+        ("AbortError: Operation aborted\n    at Timeout.run (/srv/app/x.js:1:1)\n"
+         "fetch timed out after 30000ms", "timeout"),
+        ("This session is isolated in the worktree /tmp/wt/feature, but this command writes "
+         "outside it.", "policy-denied"),
         ("File is in a directory that is denied by your permission settings.",
          "policy-denied"),
         ("Tool execution was blocked", "policy-denied"),
