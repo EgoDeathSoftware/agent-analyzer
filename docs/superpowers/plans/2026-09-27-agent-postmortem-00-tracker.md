@@ -19,7 +19,7 @@ tests and commands.
 
 | CP | File | Tasks | Delivers | Status |
 |---|---|---|---|---|
-| 1 | [`2026-09-27-agent-postmortem-01-foundation.md`](2026-09-27-agent-postmortem-01-foundation.md) | 1, 2 | `taxonomy.py`, `harness.py` and the `detectors/` package replace the monolithic `classify.py`, with no behavior change. | todo |
+| 1 | [`2026-09-27-agent-postmortem-01-foundation.md`](2026-09-27-agent-postmortem-01-foundation.md) | 1, 2 | `taxonomy.py`, `harness.py` and the `detectors/` package replace the monolithic `classify.py`, with no behavior change. | done |
 | 2 | [`2026-09-27-agent-postmortem-02-parsers.md`](2026-09-27-agent-postmortem-02-parsers.md) | 3, 4, 5, 6 | Parse-time features and new `Message`/`ParsedSession` fields in both parsers; the pi and Claude Code parser bugs are fixed; pi-subagents async runs are loaded and linked. | todo |
 | 3 | [`2026-09-27-agent-postmortem-03-detectors-core.md`](2026-09-27-agent-postmortem-03-detectors-core.md) | 7, 8, 9, 10 | The new and widened error classes; the tool-protocol, generation, loop and lifecycle detectors; the new end states; liveness passed into the detectors. | todo |
 | 4 | [`2026-09-27-agent-postmortem-04-detectors-judgment.md`](2026-09-27-agent-postmortem-04-detectors-judgment.md) | 11, 12, 13 | The recovery and alignment candidates, the focus profile, drift candidates, resource interference, and the registry completeness tests. | todo |
@@ -28,8 +28,8 @@ tests and commands.
 
 ## Tasks
 
-- [ ] **T1** (CP1) `taxonomy.py`, the single failure table (refactor, no behavior change) — commit: `—`
-- [ ] **T2** (CP1) `harness.py` tool roles and the `detectors/` package (refactor, no behavior change) — commit: `—`
+- [x] **T1** (CP1) `taxonomy.py`, the single failure table (refactor, no behavior change) — commit: `68ffd17`
+- [x] **T2** (CP1) `harness.py` tool roles and the `detectors/` package (refactor, no behavior change) — commit: `ed94928`
 - [ ] **T3** (CP2) `features.py`, the parse-time text features — commit: `—`
 - [ ] **T4** (CP2) Data-model fields, populated by the Claude Code parser — commit: `—`
 - [ ] **T5** (CP2) The pi parser populates the same fields, and end state reads `stop_reason` — commit: `—`
@@ -50,6 +50,18 @@ tests and commands.
 ## Log
 
 - 2026-09-27 — Plan split into 6 checkpoints; no implementation started.
+- 2026-09-27 — CP1 done (commits 68ffd17, ed94928, plus fix-wave commit 0d59330 for two
+  Important parsing bugs a final review found in the plan's prescribed `harness.py`:
+  `command_program` didn't split multi-line commands on newline, and `command_of`'s
+  truncated-preview fallback returned JSON-escaped text unescaped). 323/323 tests passing.
+- 2026-09-27 — For CP3: `classify_error`'s `_EXIT_CODES` inline hints for `killed`/`timeout`
+  differ in text from `taxonomy.lookup("killed"/"timeout").hint` — same failure class, two
+  hint strings depending on lookup path. Left as-is in CP1 since CP3 rewrites error classes;
+  worth unifying there.
+- 2026-09-27 — Known, deliberately unfixed gap in `harness.command_program`: a command
+  starting with `set -e` (or another shell builtin not in the `cd`-style skip-list) followed
+  by the real command on the next line still returns `"set"` as the program, not the real
+  one. Revisit if CP4's focus-profile grouping shows this matters on real corpus data.
 
 ---
 
