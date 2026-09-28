@@ -303,3 +303,20 @@ class ParsePiFeaturesTest(unittest.TestCase):
         with path.open("a", encoding="utf-8") as handle:
             handle.write('{"type": "mess')
         self.assertTrue(parse_file(path, "pi").last_line_malformed)
+
+    RUN = "743aeb2e-f120-434a-acfe-f879474708a7"
+
+    def test_async_dispatch_records_a_run_edge(self) -> None:
+        session = self.parse([
+            fx.header(), fx.user_msg("e1", None, "go"),
+            fx.assistant_msg("e2", "e1", [fx.tool_call_block("c1", "subagent", {"agent": "dev"})],
+                             stop_reason="toolUse"),
+            fx.async_dispatch_result("e3", "e2", "c1", "dev", self.RUN),
+        ])
+        self.assertIn(("c1", f"run:{self.RUN}"), session.dispatch_edges)
+
+    def test_async_run_identity(self) -> None:
+        from sessionkit.parse_pi import async_run_identity
+        session = self.parse([fx.header(),
+                              fx.session_info("i1", None, f"subagent-dev-qwen38-{self.RUN}-1")])
+        self.assertEqual(async_run_identity(session), ("dev-qwen38", self.RUN))

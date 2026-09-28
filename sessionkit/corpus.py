@@ -17,8 +17,10 @@ are what turn it into something the reports can use.
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from sessionkit import parse_pi
 from sessionkit import sources as src
@@ -63,8 +65,8 @@ def transcripts(source: src.Source) -> list[tuple[Path, str]]:
 
     Claude Code / opencode use `projects/<project>/<session>.jsonl`, with subagent transcripts
     one level deeper at `projects/<project>/<parent-session>/subagents/agent-*.jsonl`. pi has
-    no `projects/` indirection at all: `sessions/<project>/<file>.jsonl` directly, and no
-    separate subagent glob — nested subagent conversations are inline (see parse_pi.py).
+    no projects/ indirection: sessions/<project>/<file>.jsonl directly, plus pi-subagents
+    async runs at sessions/<project>/<parent-stem>/<folder>/run-<n>/session.jsonl.
     """
     if source.kind == "pi":
         return _pi_transcripts(source)
@@ -100,6 +102,7 @@ def _pi_transcripts(source: src.Source) -> list[tuple[Path, str]]:
     for project_dir in entries:
         try:
             files = sorted(project_dir.glob("*.jsonl"))
+            files.extend(sorted(project_dir.glob("*/*/run-*/session.jsonl")))
         except OSError:
             continue
         found.extend((f, project_dir.name) for f in files)
@@ -114,20 +117,7 @@ def load_one(source: src.Source, path: Path, dir_name: str) -> list[Loaded]:
     (parse_pi.py, spec Sec 4) — always at least one entry.
     """
     if source.kind == "pi":
-        parent = parse_pi.parse_file(path, source.id)
-        annotate_errors(parent)
-        parent.end_state, parent.end_reason = derive_end_state(parent)
-        loaded = [Loaded(parent, project_key(parent.cwd, source.id, dir_name),
-                         detect(parent))]
-        for child in parent.child_sessions:
-            annotate_errors(child)
-            # end_state/end_reason were already assigned in parse_pi from the subagent
-            # result's exitCode/stopReason (spec Sec 4) — derive_end_state assumes a live
-            # tail of tool calls a synthetic child, built from an already-finished
-            # subprocess, does not have.
-            loaded.append(Loaded(child, project_key(child.cwd, source.id, dir_name),
-                                 detect(child)))
-        return loaded
+        return _load_pi(source, path, dir_name)
 
     session = parse_file(path, source.id)
     if source.location == "container":
@@ -139,6 +129,83 @@ def load_one(source: src.Source, path: Path, dir_name: str) -> list[Loaded]:
     # real use, and only `sk tail`/`sk files` ever ask for it — every other command paid for
     # a re-read of each session's last 6 lines from disk for nothing.
     return [Loaded(session, project_key(session.cwd, source.id, dir_name), anomalies)]
+
+
+def _load_pi(source: src.Source, path: Path, dir_name: str) -> list[Loaded]:
+    """A pi session plus its synthetic subagent children, or one pi-subagents async run."""
+    parent = parse_pi.parse_file(path, source.id)
+    meta = _mark_async_child(parent, path) if _is_async_run(path) else {}
+    annotate_errors(parent)
+    parent.end_state, parent.end_reason = derive_end_state(parent)
+    _apply_exit_code(parent, meta)
+    loaded = [Loaded(parent, project_key(parent.cwd, source.id, dir_name), detect(parent))]
+    for child in parent.child_sessions:
+        annotate_errors(child)
+        # end_state/end_reason were already assigned in parse_pi from the subagent result's
+        # exitCode/stopReason — derive_end_state assumes a live tail of tool calls that a
+        # synthetic child, built from an already-finished subprocess, does not have.
+        loaded.append(Loaded(child, project_key(child.cwd, source.id, dir_name),
+                             detect(child)))
+    return loaded
+
+
+def _is_async_run(path: Path) -> bool:
+    """A pi-subagents async child run: ``<parent-stem>/<folder>/run-<n>/session.jsonl``."""
+    return path.name == "session.jsonl" and path.parent.name.startswith("run-")
+
+
+def _mark_async_child(session: ParsedSession, path: Path) -> dict[str, Any]:
+    """Mark an async run as a subagent of the session its grandparent folder is named after.
+
+    Returns the run's ``meta.json`` (empty when missing or unreadable) for the exit code.
+    """
+    parent_stem = path.parents[2].name
+    session.is_subagent = True
+    session.parent_sid = parent_stem.split("_", 1)[1] if "_" in parent_stem else parent_stem
+    agent, run_id = parse_pi.async_run_identity(session)
+    meta = _async_meta(path.parents[3] / "subagent-artifacts", run_id)
+    session.agent_type = agent or str(meta.get("agent") or "")
+    return meta
+
+
+def _async_meta(folder: Path, run_id: str) -> dict[str, Any]:
+    """The first readable ``<runId>_*_meta.json`` in ``folder``, or ``{}``."""
+    if not run_id:
+        return {}
+    for candidate in sorted(folder.glob(f"{run_id}_*_meta.json")):
+        try:
+            data = json.loads(candidate.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(data, dict):
+            return data
+    return {}
+
+
+def _apply_exit_code(session: ParsedSession, meta: dict[str, Any]) -> None:
+    """A run that exited non-zero did not complete, whatever its transcript's tail says."""
+    code = meta.get("exitCode")
+    if isinstance(code, bool) or not isinstance(code, int) or code == 0:
+        return
+    if session.end_state == "complete":
+        session.end_state = "error-cascade"
+        session.end_reason = f"subagent run exited with code {code}"
+
+
+def _link_async_runs(sessions: list[Loaded]) -> None:
+    """Resolve a parent's ``run:<runId>`` dispatch edges to the async child's session id."""
+    runs: dict[str, str] = {}
+    for entry in sessions:
+        if entry.session.is_subagent:
+            _agent, run_id = parse_pi.async_run_identity(entry.session)
+            if run_id:
+                runs[run_id] = entry.session.sid
+    for entry in sessions:
+        edges = entry.session.dispatch_edges
+        if any(child.startswith("run:") for _call, child in edges):
+            entry.session.dispatch_edges = [
+                (call, runs.get(child[4:], child) if child.startswith("run:") else child)
+                for call, child in edges]
 
 
 def _disambiguate(sessions: list[Loaded]) -> None:
@@ -214,4 +281,5 @@ def load(only: str | None = None) -> Corpus:
             except OSError:
                 corpus.failed += 1
     _disambiguate(corpus.sessions)
+    _link_async_runs(corpus.sessions)
     return corpus

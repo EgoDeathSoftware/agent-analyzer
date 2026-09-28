@@ -40,6 +40,12 @@ FINAL_TEXT_CHARS = 4000
 _PI_STOP_REASONS = {"stop": "end", "toolUse": "tool_use", "length": "length",
                     "error": "error", "aborted": "aborted"}
 
+_UUID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+#: pi-subagents' async dispatch result names the detached run: ``Async: <agent> [<runId>]``.
+_ASYNC_DISPATCH_RE = re.compile(rf"Async: \S+ \[({_UUID})\]")
+#: An async child run names itself ``subagent-<agent>-<runId>-<n>`` in its session_info.
+_ASYNC_NAME_RE = re.compile(rf"^subagent-(.+)-({_UUID})")
+
 
 def _text_of(content: Any) -> str:
     """Flatten a `string | (TextContent|ImageContent|ThinkingContent)[]` field to plain text."""
@@ -106,11 +112,15 @@ class _Parser:
             self._header(rec)
         elif etype == "message":
             self._message(line_no, rec)
-        elif etype in ("model_change", "thinking_level_change", "label", "session_info",
-                       "context_edit"):
+        elif etype in ("model_change", "thinking_level_change", "label", "context_edit"):
             ts = str(rec.get("timestamp") or "")
             self._touch_ts(ts)
             self.out.sysev.append(SysEvent(line_no, ts, etype))
+        elif etype == "session_info":
+            ts = str(rec.get("timestamp") or "")
+            self._touch_ts(ts)
+            self.out.sysev.append(SysEvent(line_no, ts, "session_info",
+                                           preview(str(rec.get("name") or ""), 200)))
         elif etype == "compaction":
             ts = str(rec.get("timestamp") or "")
             self._touch_ts(ts)
@@ -248,6 +258,8 @@ class _Parser:
                 call, details if isinstance(details, dict) else {})
             self.out.child_sessions.extend(children)
             self.out.dispatch_edges.extend((call.tool_use_id, c.sid) for c in children)
+            for run_id in _ASYNC_DISPATCH_RE.findall(body):
+                self.out.dispatch_edges.append((call.tool_use_id, f"run:{run_id}"))
 
     def _bash(self, line_no: int, ts: str, msg: dict[str, Any]) -> None:
         exit_code = msg.get("exitCode")
@@ -321,6 +333,16 @@ def _subagent_children(parent_sid: str, source_id: str, path: str, parent_cwd: s
 
         children.append(child)
     return children
+
+
+def async_run_identity(session: ParsedSession) -> tuple[str, str]:
+    """``(agent, run_id)`` from an async child run's ``session_info`` name, else ``("", "")``."""
+    for event in session.sysev:
+        if event.subtype == "session_info":
+            match = _ASYNC_NAME_RE.match(event.detail)
+            if match:
+                return match.group(1), match.group(2)
+    return "", ""
 
 
 def parse_file(path: Path, source_id: str) -> ParsedSession:

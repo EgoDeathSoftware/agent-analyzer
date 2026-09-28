@@ -12,6 +12,7 @@ from typing import Any
 
 SID = "aaaa1111-bbbb-2222-cccc-3333dddd4444"
 CWD = "/home/dev/myproject"
+PARENT_FILE = f"20260901T000000_{SID}.jsonl"
 
 
 def header(ts: str = "2026-09-01T00:00:00.000Z", sid: str = SID, **extra: Any) -> dict[str, Any]:
@@ -77,6 +78,19 @@ def tool_result_msg(entry_id: str, parent_id: str | None, call_id: str, tool_nam
     return _entry("message", entry_id, parent_id, ts, message=msg)
 
 
+def session_info(entry_id: str, parent_id: str | None, name: str,
+                 ts: str = "2026-09-01T00:00:00.500Z") -> dict[str, Any]:
+    return _entry("session_info", entry_id, parent_id, ts, name=name)
+
+
+def async_dispatch_result(entry_id: str, parent_id: str | None, call_id: str, agent: str,
+                          run_id: str, ts: str = "2026-09-01T00:00:03.000Z") -> dict[str, Any]:
+    """The toolResult pi-subagents writes for an async dispatch (shape from a real run)."""
+    text = (f"Run fan-out: 1/64 used, 63 remaining\nAsync: {agent} [{run_id}]\n\n"
+            "The async run is detached and running in the background.")
+    return tool_result_msg(entry_id, parent_id, call_id, "subagent", text, ts=ts)
+
+
 def bash_msg(entry_id: str, parent_id: str | None, command: str, output: str,
             exit_code: int | None = 0, cancelled: bool = False,
             ts: str = "2026-09-01T00:00:03.000Z") -> dict[str, Any]:
@@ -112,6 +126,23 @@ def write(tmp: Path, entries: list[dict[str, Any]],
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / name
     path.write_text("\n".join(json.dumps(e) for e in entries) + "\n", encoding="utf-8")
+    return path
+
+
+def write_async_run(tmp: Path, parent_name: str, folder_id: str,
+                    entries: list[dict[str, Any]], *, run_id: str = "", agent: str = "",
+                    meta: dict[str, Any] | None = None, meta_text: str | None = None) -> Path:
+    """Write an async child run at ``<parent-stem>/<folder>/run-0/session.jsonl``, plus its
+    ``subagent-artifacts/<runId>_<agent>_meta.json`` when ``meta``/``meta_text`` is given."""
+    project = tmp / "sessions" / "--home-dev-myproject--"
+    path = project / Path(parent_name).stem / folder_id / "run-0" / "session.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(json.dumps(e) for e in entries) + "\n", encoding="utf-8")
+    if meta is not None or meta_text is not None:
+        artifacts = project / "subagent-artifacts"
+        artifacts.mkdir(parents=True, exist_ok=True)
+        body = meta_text if meta_text is not None else json.dumps(meta)
+        (artifacts / f"{run_id}_{agent}_meta.json").write_text(body, encoding="utf-8")
     return path
 
 
