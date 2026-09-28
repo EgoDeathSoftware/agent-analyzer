@@ -23,9 +23,14 @@ TIER_J = "J"
 #: All tuneable detector limits in one place rather than scattered as literals.
 THRESHOLDS: dict[str, float] = {
     "repeat_tool": 3,       # identical (tool, input) calls in one session
-    "file_thrash": 5,       # edits to the same path
-    "read_loop": 4,         # reads of the same path
+    "file_thrash": 8,       # edits to the same path
+    "file_thrash_min": 5,   # ... or this many edits to one path
+    "file_thrash_failures": 2,  # ... when at least this many of them failed
+    "read_loop": 5,         # reads of the same path
     "error_cascade": 3,     # consecutive failing tool calls
+    "edit_mismatch_spiral": 3,  # edit-mismatch failures on one path
+    "read_only_spiral": 8,  # consecutive read/search calls
+    "read_only_text_chars": 200,  # an assistant answer at least this long breaks the run
     "hook_pingpong": 2,     # hook blocks against the same tool
     "compaction_churn": 2,  # compaction events
     "stall_ms": 120_000,    # a single tool call taking longer than this
@@ -245,6 +250,12 @@ FINDING_KINDS: tuple[FailureClass, ...] = (
     _kind("rejection-persist", "loop", TIER_S, "model",
           "A call was retried after the user explicitly rejected it — respect the rejection "
           "and ask before retrying, rather than trying again unprompted."),
+    _kind("edit-mismatch-spiral", "loop", TIER_S, "model",
+          "Edits to the same file failed repeatedly — the model is editing from a stale or "
+          "imagined view of the file. Re-read the exact region before each edit."),
+    _kind("read-only-spiral", "loop", TIER_S, "model",
+          "A long run of reads and searches with no edit, command or answer — the model is "
+          "gathering instead of acting. Ask for a plan or a first change."),
     _kind("tool-text-leak", "tool-protocol", TIER_S, "serving",
           "The model wrote a tool call as plain text, so nothing ran and the turn ended. "
           "Check the serving stack's tool-call parser and chat template for this model "

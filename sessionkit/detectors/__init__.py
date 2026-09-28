@@ -22,6 +22,8 @@ DETECTORS: list[Callable[[ParsedSession], list[Anomaly]]] = [
     lifecycle.compaction_churn,
     lifecycle.stalls,
     loops.rejection_persist,
+    loops.edit_mismatch_spiral,
+    loops.read_only_spiral,
     tool_protocol.error_classes,
     tool_protocol.tool_text_leak,
     generation.empty_turn,
