@@ -21,6 +21,10 @@ class ScopeCreepTest(unittest.TestCase):
     def test_an_implement_ask_is_not_scope_creep(self) -> None:
         self.assertEqual(alignment.scope_creep(self._session("review and fix the parser")), [])
 
+    def test_a_fixing_gerund_ask_is_not_scope_creep(self) -> None:
+        s = self._session("You are fixing two issues found in a review")
+        self.assertEqual(alignment.scope_creep(s), [])
+
 
 class UnverifiedCompletionTest(unittest.TestCase):
     def _session(self, *commands: str):
@@ -52,6 +56,12 @@ class PrematureStopTest(unittest.TestCase):
     def test_a_finished_answer_is_not_premature(self) -> None:
         s = df.session(messages=[df.msg(4, text="Finished; all tests pass.")],
                        final_text="Finished; all tests pass.", end_state="complete")
+        self.assertEqual(alignment.premature_stop(s), [])
+
+    def test_let_me_know_is_not_premature(self) -> None:
+        s = df.session(messages=[df.msg(4, text="Let me know if you want more changes.")],
+                       final_text="Let me know if you want more changes.",
+                       end_state="complete")
         self.assertEqual(alignment.premature_stop(s), [])
 
 

@@ -15,9 +15,16 @@ from sessionkit.parse import Message, ParsedSession, ToolCall
 _REVIEW = re.compile(
     r"\b(?:review|explain|analy[sz]e|audit|summari[sz]e|describe|what does|why does|"
     r"read-only|don'?t (?:change|edit|modify)|do not (?:change|edit|modify))\b", re.I)
+#: Each verb also matches its inflected forms (fixes/fixed/fixing, ...) — a subagent dispatch
+#: prompt phrased "you are fixing two issues found in a review" is an implement ask, not a
+#: review-only one, even though it contains the word "review".
 _IMPLEMENT = re.compile(
-    r"\b(?:fix|implement|add|change|refactor|update|write|create|build|make|edit|modify|"
-    r"remove|delete|rename)\b", re.I)
+    r"\b(?:fix(?:es|ed|ing)?|implement(?:s|ed|ing)?|add(?:s|ed|ing)?|"
+    r"chang(?:e(?:s|d)?|ing)|refactor(?:s|ed|ing)?|updat(?:e(?:s|d)?|ing)|"
+    r"writ(?:e|es|ing)|wrote|written|creat(?:e(?:s|d)?|ing)|"
+    r"build(?:s|ing)?|built|mak(?:e|es|ing)|made|edit(?:s|ed|ing)?|"
+    r"modif(?:y|ies|ied|ying)|remov(?:e(?:s|d)?|ing)|delet(?:e(?:s|d)?|ing)|"
+    r"renam(?:e(?:s|d)?|ing))\b", re.I)
 _NEGATED = re.compile(r"\b(?:don'?t|do not|never|without)\s+\w+", re.I)
 _CHANGE_ROLES = ("edit", "write")
 

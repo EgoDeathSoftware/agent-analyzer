@@ -49,9 +49,12 @@ _CC_STOP_REASONS = {"end_turn": "end", "stop_sequence": "end", "pause_turn": "en
                     "refusal": "end", "tool_use": "tool_use", "max_tokens": "length"}
 #: The model name Claude Code writes on its own records: API errors, resume notices.
 SYNTHETIC_MODEL = "<synthetic>"
-#: User records Claude Code writes itself, as opposed to text a person typed.
+#: User records Claude Code writes itself, as opposed to text a person typed. The last two are
+#: this project's own multi-agent "teammate" relay convention, seen both wrapping the marker
+#: directly and behind a plain-text lead-in sentence.
 _INJECTED_PREFIXES = ("<local-command-caveat>", "<task-notification>", "<command-name>",
-                      "<local-command-stdout>", "<system-reminder>")
+                      "<local-command-stdout>", "<system-reminder>", "<teammate-message",
+                      "Another Claude session sent a message:")
 
 #: Tool name → file operation. Mirrors the tracker's own mapping.
 FILE_TOOLS = {

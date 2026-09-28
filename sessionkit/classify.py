@@ -91,9 +91,11 @@ _APOLOGY_RE = re.compile(r"\b(sorry|apologi[sz]e|unable to|can'?t|cannot)\b", re
 _COMPLETION_RE = re.compile(
     r"\b(done|complete[ds]?|finished|shipped|ready|works|all set|"
     r"passing|passes)\b", re.I)
+#: "let me know ..." offers help; it does not state a pending action the way "let me run the
+#: tests" does, so it is excluded with a negative lookahead rather than dropped outright.
 _NEXT_STEP_RE = re.compile(
     r"(?:^|[\.\n])\s*(?:I(?:'|’)?ll|I will|next[,:]|next step|going to|"
-    r"about to|let me)\b", re.I)
+    r"about to|let me(?!\s+know\b))\b", re.I)
 
 
 def derive_tail_signal(session: ParsedSession, tail_texts: dict[int, str]) -> str:

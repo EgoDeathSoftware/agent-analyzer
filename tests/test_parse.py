@@ -244,13 +244,16 @@ class ParseFeaturesTest(unittest.TestCase):
         texts = ["fix the build", "<local-command-caveat>Caveat: generated locally.",
                  "<task-notification><task-id>t1</task-id>", "<command-name>/clear</command-name>",
                  "<local-command-stdout>ok</local-command-stdout>",
-                 "<system-reminder>note</system-reminder>"]
+                 "<system-reminder>note</system-reminder>",
+                 '<teammate-message teammate_id="team-lead">do the thing</teammate-message>',
+                 "Another Claude session sent a message: "
+                 '<teammate-message teammate_id="x">do another thing</teammate-message>']
         records = [fx.user(text, ts=f"2026-08-01T00:00:0{i}Z") for i, text in enumerate(texts)]
-        records.append(fx.user("Continue from where you left off.", ts="2026-08-01T00:00:08Z",
+        records.append(fx.user("Continue from where you left off.", ts="2026-08-01T00:00:09Z",
                                isMeta=True))
         session = self.parse(records)
         self.assertEqual([m.is_prompt for m in session.messages],
-                         [True, False, False, False, False, False, False])
+                         [True, False, False, False, False, False, False, False, False])
 
     def test_tool_calls_counted(self) -> None:
         message = self._last(fx.tool_use("t1", "Read", {"file_path": "/a"}),
