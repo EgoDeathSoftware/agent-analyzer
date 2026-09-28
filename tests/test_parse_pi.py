@@ -6,7 +6,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from sessionkit.parse_pi import parse_file
+from sessionkit.classify import annotate_errors
+from sessionkit.parse_pi import OUTPUT_PREVIEW, parse_file
 from tests import fixtures_pi as fx
 
 
@@ -34,6 +35,37 @@ class ParsePiTest(unittest.TestCase):
         self.assertFalse(call.is_error)
         self.assertEqual(call.err_class, "")
         self.assertIn("file contents", call.output_preview)
+
+    def _long_failed_bash(self, status: str):
+        body = "\n".join(f"build step {i} ok" for i in range(400)) + f"\n\n{status}\n"
+        self.assertGreater(len(body), OUTPUT_PREVIEW)
+        session = self.parse([
+            fx.header(), fx.user_msg("e1", None, "build"),
+            fx.assistant_msg("e2", "e1", [fx.tool_call_block("c1", "bash", {"command": "mk"})],
+                             stop_reason="toolUse"),
+            fx.tool_result_msg("e3", "e2", "c1", "bash", body, is_error=True)])
+        annotate_errors(session)
+        return session.tools[0]
+
+    def test_status_line_of_a_long_output_survives_the_preview(self) -> None:
+        for status, expected in (("Command exited with code 137", "killed"),
+                                 ("Command timed out after 30 seconds", "timeout"),
+                                 ("Command aborted", "aborted")):
+            with self.subTest(expected):
+                call = self._long_failed_bash(status)
+                self.assertEqual(call.err_class, expected)
+                self.assertTrue(call.output_preview.endswith(status))
+                self.assertLessEqual(len(call.output_preview), OUTPUT_PREVIEW)
+                self.assertTrue(call.output_preview.startswith("build step 0 ok"))
+
+    def test_short_output_keeps_its_status_line_once(self) -> None:
+        session = self.parse([
+            fx.header(), fx.user_msg("e1", None, "build"),
+            fx.assistant_msg("e2", "e1", [fx.tool_call_block("c1", "bash", {"command": "mk"})],
+                             stop_reason="toolUse"),
+            fx.tool_result_msg("e3", "e2", "c1", "bash", "oops\n\nCommand exited with code 2",
+                               is_error=True)])
+        self.assertEqual(session.tools[0].output_preview, "oops Command exited with code 2")
 
     def test_records_file_op_from_toolcall(self) -> None:
         session = self.parse(fx.simple_session())

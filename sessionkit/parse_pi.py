@@ -45,6 +45,9 @@ _UUID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
 _ASYNC_DISPATCH_RE = re.compile(rf"Async: \S+ \[({_UUID})\]")
 #: An async child run names itself ``subagent-<agent>-<runId>-<n>`` in its session_info.
 _ASYNC_NAME_RE = re.compile(rf"^subagent-(.+)-({_UUID})")
+#: pi appends a command's status as the last line of its output, past the preview's reach.
+_STATUS_LINE_RE = re.compile(r"Command (?:exited with code \d+|timed out after|aborted)")
+_STATUS_LINE_MAX = 200
 
 
 def _text_of(content: Any) -> str:
@@ -60,6 +63,19 @@ def _text_of(content: Any) -> str:
         elif isinstance(block, dict):
             parts.append(str(block.get("text") or block.get("thinking") or ""))
     return "\n".join(p for p in parts if p)
+
+
+def _result_preview(body: str) -> str:
+    """The output preview, keeping pi's trailing status line when the head would drop it."""
+    head = preview(body, OUTPUT_PREVIEW)
+    last = body.rstrip().rpartition("\n")[2].strip()
+    if not _STATUS_LINE_RE.match(last):
+        return head
+    status = preview(last, _STATUS_LINE_MAX)
+    if head.endswith(status):
+        return head
+    tail = f"\n\n{status}"
+    return preview(body, OUTPUT_PREVIEW - len(tail)) + tail
 
 
 def _ms_to_iso(ms: Any) -> str:
@@ -238,7 +254,7 @@ class _Parser:
         call.dur_ms = features.delta_ms(call.ts, ts)
         call.is_error = bool(msg.get("isError"))
         call.out_bytes = len(body)
-        call.output_preview = preview(body, OUTPUT_PREVIEW)
+        call.output_preview = _result_preview(body)
         if call.name == "subagent":
             details = msg.get("details")
             children = _subagent_children(
