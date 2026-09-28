@@ -29,6 +29,9 @@ THRESHOLDS: dict[str, float] = {
     "hook_pingpong": 2,     # hook blocks against the same tool
     "compaction_churn": 2,  # compaction events
     "stall_ms": 120_000,    # a single tool call taking longer than this
+    "degeneration_ratio": 0.5,          # repeated word 8-grams within one message
+    "generation_stall_ms": 600_000,     # a model turn slower than this ...
+    "generation_stall_factor": 5,       # ... and this many times the session's median
 }
 
 
@@ -242,6 +245,24 @@ FINDING_KINDS: tuple[FailureClass, ...] = (
     _kind("rejection-persist", "loop", TIER_S, "model",
           "A call was retried after the user explicitly rejected it — respect the rejection "
           "and ask before retrying, rather than trying again unprompted."),
+    _kind("tool-text-leak", "tool-protocol", TIER_S, "serving",
+          "The model wrote a tool call as plain text, so nothing ran and the turn ended. "
+          "Check the serving stack's tool-call parser and chat template for this model "
+          "(vLLM --tool-call-parser); long contexts make it worse."),
+    _kind("empty-turn", "generation", TIER_S, "serving",
+          "The model ended its turn with no text and no tool call — usually reasoning-only "
+          "output. Check the chat template and reasoning parser, or lower the thinking level."),
+    _kind("degeneration", "generation", TIER_S, "serving",
+          "The model repeated itself within one turn — a sampling degeneration loop. Raise "
+          "temperature or add a repetition penalty for this model, lower the thinking level, "
+          "or keep the context smaller before hard steps."),
+    _kind("output-truncated", "generation", TIER_S, "harness",
+          "The response hit the output token limit mid-turn. Raise the model's maxTokens, or "
+          "ask for smaller steps (write files in parts)."),
+    _kind("generation-stall", "generation", TIER_S, "serving",
+          "One model turn took far longer than the session's norm — a runaway reasoning loop "
+          "or an overloaded server. Check that turn's reasoning for repetition and the "
+          "server's load at the time."),
 )
 
 ALL_CLASSES: tuple[FailureClass, ...] = (*ERROR_CLASSES, KILLED, *API_ERROR_CLASSES,
