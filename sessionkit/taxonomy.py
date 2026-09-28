@@ -1,0 +1,221 @@
+"""The failure taxonomy: every error class and finding kind, in one table.
+
+Each entry names a failure, says how it is detected (its tier), where its fix belongs (its fix
+target), and gives a one-line hint. Error classes also carry the text patterns that recognise
+them in a tool result; their order matters because patterns overlap — a hook block also
+contains "exit".
+
+The error-class list is grounded in the live corpus rather than guessed: clustering the 208
+error results across 86 transcripts put ``hook-block`` first at 47 occurrences (23% of all
+failures). Text that matches nothing lands in ``other`` with its normalised prefix retained,
+so the taxonomy grows from real misses.
+"""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass
+
+TIER_S = "S"
+TIER_CANDIDATE = "S->J"
+TIER_J = "J"
+
+#: All tuneable detector limits in one place rather than scattered as literals.
+THRESHOLDS: dict[str, float] = {
+    "repeat_tool": 3,       # identical (tool, input) calls in one session
+    "file_thrash": 5,       # edits to the same path
+    "read_loop": 4,         # reads of the same path
+    "error_cascade": 3,     # consecutive failing tool calls
+    "hook_pingpong": 2,     # hook blocks against the same tool
+    "compaction_churn": 2,  # compaction events
+    "stall_ms": 120_000,    # a single tool call taking longer than this
+}
+
+
+@dataclass(frozen=True)
+class FailureClass:
+    """One named failure: an error class matched in result text, or a finding kind.
+
+    ``fix_target`` is where the remedy belongs: ``model``, ``harness`` (instructions file, tool
+    config, token limits), ``serving`` (vLLM parser, chat template, sampling), ``env``, or
+    ``none``.
+    """
+
+    name: str
+    family: str
+    tier: str
+    fix_target: str
+    hint: str
+    patterns: tuple[re.Pattern[str], ...] = ()
+
+
+def _error(name: str, family: str, fix_target: str, hint: str, *regexes: str,
+           flags: int = re.I) -> FailureClass:
+    """An error class: structural tier, recognised by its patterns."""
+    patterns = tuple(re.compile(r, flags) for r in regexes)
+    return FailureClass(name, family, TIER_S, fix_target, hint, patterns)
+
+
+def _kind(name: str, family: str, tier: str, fix_target: str, hint: str) -> FailureClass:
+    """A finding kind: emitted by a detector, or (tier J) judged by the skill."""
+    return FailureClass(name, family, tier, fix_target, hint)
+
+
+#: Ordered: the first class whose pattern matches wins, so specific classes precede generic
+#: ones (a denied mkdir arrives as "Exit code 1 ... Permission denied").
+ERROR_CLASSES: tuple[FailureClass, ...] = (
+    _error("hook-block", "environment", "harness",
+           "Promote the rule into CLAUDE.md so the command is never emitted.",
+           r"PreToolUse:|PostToolUse:.*hook error|\bBLOCKED:"),
+    _error("user-rejected", "environment", "none",
+           "Approach problem — the model proposed something the user declined.",
+           r"user doesn't want to proceed|tool use was rejected"),
+    # Distinct from user-rejected: no human saw this one, the harness blocked it.
+    _error("policy-denied", "environment", "harness",
+           "Blocked by permission policy — needs approval or a different approach.",
+           r"denied by the Claude Code|auto mode classifier|"
+           r"permission for this action was denied|"
+           r"permission to use \w+.{0,200}?has been denied", flags=re.I | re.S),
+    # A malformed call is the model's own bug, not the environment's.
+    _error("input-validation", "tool-protocol", "model",
+           "Malformed tool call — the model passed a wrong argument type.",
+           r"InputValidationError|parameter `\w+` type is expected"),
+    _error("file-too-large", "tool-protocol", "model",
+           "Read with offset/limit, or use Grep instead of a full read.",
+           r"exceeds maximum allowed tokens"),
+    _error("read-truncated", "tool-protocol", "model",
+           "Narrow the read; the model only saw part of the file.",
+           r"read_truncation|truncated to \d+ lines"),
+    _error("stale-read", "tool-protocol", "model",
+           "Re-read the file before editing; another writer changed it.",
+           r"has been modified since read|file has changed since"),
+    _error("unread-file", "tool-protocol", "model",
+           "Read before Write/Edit — the tool requires it.",
+           r"has not been read yet|read it first"),
+    _error("missing-tool", "environment", "env",
+           "Install the tool or drop the dependency on it.",
+           r"command not found|: not found$|\bno such command\b"),
+    # Must precede exit-code: a denied mkdir surfaces as "Exit code 1 ... Permission denied".
+    _error("permission-denied", "environment", "env",
+           "Write target is not writable by this user — pick a writable path.",
+           r"EACCES|permission denied|EPERM\b"),
+    _error("not-a-repo", "generic", "none",
+           "cwd assumption — the command ran outside a repo.",
+           r"not a git repository"),
+    _error("not-found", "generic", "none",
+           "Path assumption — verify the path before operating on it.",
+           r"File does not exist|Directory does not exist|no such file or directory|"
+           r"\bENOENT\b"),
+    _error("rate-limit", "environment", "env",
+           "Back off, or route to an alternate provider.",
+           r"rate limit|429\b|too many requests"),
+    _error("api-error", "environment", "env",
+           "Transient or misconfigured endpoint — check which.",
+           r"request failed with status code|\b5\d\d\b error"),
+    _error("mcp-error", "environment", "env",
+           "MCP server health — check the server, not the prompt.",
+           r"error in mcp__|mcp server .* (failed|error)"),
+    _error("timeout", "generic", "none",
+           "Raise the timeout or split the work.",
+           r"timed out|timeout exceeded"),
+    _error("exit-code", "generic", "none",
+           "Genuine command failure — read the command output.",
+           r"^exit code \d+"),
+)
+
+#: Exit codes whose meaning is unambiguous. Checked *before* the body-text rules because the
+#: code is the tool's own verdict about the call, while body text is often incidental — a
+#: compound command's stray ``ls: No such file`` should not outrank the fact that the call
+#: itself timed out.
+_EXIT_CODES: dict[int, tuple[str, str]] = {
+    124: ("timeout", "Command hit its timeout — raise it or split the work."),
+    137: ("killed", "Killed (SIGKILL, usually OOM) — the work did not complete."),
+    143: ("killed", "Terminated (SIGTERM) — the work did not complete."),
+}
+_EXIT_RE = re.compile(r"^exit code (\d+)\b", re.I)
+
+#: Reached only through ``_EXIT_CODES``, so it has no text patterns of its own.
+KILLED = _kind("killed", "generic", TIER_S, "env",
+               "Killed (SIGKILL, usually OOM) or terminated — the work did not complete.")
+
+FINDING_KINDS: tuple[FailureClass, ...] = (
+    _kind("repeat-tool", "loop", TIER_S, "model",
+          "Same call retried with identical input — check why the prior result wasn't used "
+          "instead of re-running it."),
+    _kind("file-thrash", "loop", TIER_S, "model",
+          "Same file edited repeatedly — plan the full change before editing, or use "
+          "MultiEdit for a single pass."),
+    _kind("read-loop", "loop", TIER_S, "model",
+          "Same file re-read repeatedly — remember its contents instead of re-reading."),
+    _kind("error-cascade", "loop", TIER_S, "model",
+          "Consecutive failures — stop and diagnose the root cause instead of retrying "
+          "variants of the same call."),
+    _kind("hook-pingpong", "loop", TIER_S, "harness",
+          "The same tool was blocked by a hook repeatedly — the rule belongs in CLAUDE.md, "
+          "where it teaches at generation time instead of blocking at execution time."),
+    _kind("agent-kill", "lifecycle", TIER_S, "none",
+          "A subagent was killed before returning — check the dispatch conditions or the "
+          "timeout that ended it."),
+    _kind("orphan-subagent", "lifecycle", TIER_S, "harness",
+          "A subagent was spawned and never returned — check whether it stalled or the "
+          "parent moved on without waiting."),
+    _kind("compaction-churn", "lifecycle", TIER_S, "harness",
+          "Context was compacted more than once — the session outgrew its window; consider "
+          "splitting the work or narrowing scope."),
+    _kind("stall", "lifecycle", TIER_S, "env",
+          "A single tool call ran unusually long — check for a network hang or an unbounded "
+          "operation."),
+    _kind("rejection-persist", "loop", TIER_S, "model",
+          "A call was retried after the user explicitly rejected it — respect the rejection "
+          "and ask before retrying, rather than trying again unprompted."),
+)
+
+ALL_CLASSES: tuple[FailureClass, ...] = (*ERROR_CLASSES, KILLED, *FINDING_KINDS)
+_REGISTRY: dict[str, FailureClass] = {c.name: c for c in ALL_CLASSES}
+
+_NORMALISE = [
+    (re.compile(r"/[\w./\-]{6,}"), "<PATH>"),
+    (re.compile(r"\b0x[0-9a-f]+\b", re.I), "<HEX>"),
+    (re.compile(r"\b\d+\b"), "N"),
+    (re.compile(r"\s+"), " "),
+]
+
+
+def lookup(name: str) -> FailureClass | None:
+    """The taxonomy entry for an error class or finding kind, or ``None``."""
+    return _REGISTRY.get(name)
+
+
+def classify_error(text: str) -> tuple[str, str]:
+    """Classify an error result body.
+
+    Args:
+        text: The tool result text (already redacted and previewed).
+
+    Returns:
+        ``(class, fix_hint)``. Unmatched text returns ``("other", "")``.
+    """
+    body = (text or "").strip()
+    if not body:
+        return ("empty", "")
+    match = _EXIT_RE.match(body)
+    if match:
+        known = _EXIT_CODES.get(int(match.group(1)))
+        if known:
+            return known
+    for entry in ERROR_CLASSES:
+        if any(p.search(body) for p in entry.patterns):
+            return (entry.name, entry.hint)
+    return ("other", "")
+
+
+def signature(text: str, limit: int = 80) -> str:
+    """Collapse an error body into a clusterable signature.
+
+    Digits, hex and long paths are the parts that differ between otherwise-identical failures,
+    so they are replaced with placeholders before truncation.
+    """
+    body = (text or "").strip()
+    for pattern, replacement in _NORMALISE:
+        body = pattern.sub(replacement, body)
+    return body[:limit]

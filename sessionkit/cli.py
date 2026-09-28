@@ -14,7 +14,7 @@ from datetime import datetime, timedelta, timezone
 
 from sessionkit import __version__, corpus as corpus_mod, pricing, query, search
 from sessionkit import sources as src_mod
-from sessionkit.classify import classify_error
+from sessionkit.taxonomy import classify_error
 from sessionkit.corpus import Corpus
 from sessionkit.render import (BUDGET_AGGREGATE_KB, BUDGET_EXCERPT_KB, BUDGET_INDEX_KB,
                                Report, human_cost)
@@ -243,7 +243,7 @@ def cmd_forensics(corpus: Corpus, args: argparse.Namespace) -> str:
     """Why one session went wrong: findings, a line-anchored timeline, and what went right.
 
     Deterministic by design — findings and hints are looked up from the detectors and
-    ``classify.ANOMALY_HINTS``, not generated, so this is a report, not a narrative.
+    ``taxonomy``, not generated, so this is a report, not a narrative.
     """
     entry = query.find_session(corpus, args.sid)
     if entry is None:

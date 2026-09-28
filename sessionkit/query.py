@@ -20,7 +20,7 @@ from pathlib import Path, PurePath
 from typing import Any, Callable, Iterable
 
 from sessionkit import pricing, settingsjson as sj
-from sessionkit.classify import ANOMALY_HINTS, signature
+from sessionkit.taxonomy import lookup, signature
 from sessionkit.corpus import Corpus, Loaded
 from sessionkit.parse import ToolCall, block_text, read_line
 from sessionkit.redact import redact
@@ -733,8 +733,12 @@ def deny_rows(corpus: Corpus, scope: Filter) -> list[Row]:
 def forensics_findings(entry: Loaded) -> list[Row]:
     """One session's anomalies, most frequent first, each with its prevention hint."""
     ordered = sorted(entry.anomalies, key=lambda a: -a.count)
-    return [{"kind": a.kind, "detail": a.detail, "count": a.count, "lines": a.lines,
-             "hint": ANOMALY_HINTS.get(a.kind, "")} for a in ordered]
+    rows = []
+    for a in ordered:
+        known = lookup(a.kind)
+        rows.append({"kind": a.kind, "detail": a.detail, "count": a.count, "lines": a.lines,
+                     "hint": known.hint if known else ""})
+    return rows
 
 
 def forensics_timeline(entry: Loaded) -> list[Row]:

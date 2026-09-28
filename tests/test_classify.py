@@ -8,9 +8,9 @@ from __future__ import annotations
 
 import unittest
 
-from sessionkit.classify import (annotate_errors, classify_error, derive_end_state, detect,
-                                 signature)
+from sessionkit.classify import annotate_errors, derive_end_state, detect
 from sessionkit.parse import FileOp, ParsedSession, SysEvent, ToolCall
+from sessionkit.taxonomy import classify_error, signature
 
 
 def _session(**kw) -> ParsedSession:
@@ -263,12 +263,15 @@ class AnomalyHintTest(unittest.TestCase):
     """Every detected anomaly kind has a canned prevention hint (PLAN.md §7 Phase 2)."""
 
     def test_every_detector_kind_has_a_hint(self) -> None:
-        from sessionkit.classify import ANOMALY_HINTS
+        from sessionkit.taxonomy import lookup
         known_kinds = {"repeat-tool", "file-thrash", "read-loop", "error-cascade",
-                      "hook-pingpong", "agent-kill", "orphan-subagent", "compaction-churn",
-                      "stall", "rejection-persist"}
-        self.assertEqual(set(ANOMALY_HINTS), known_kinds)
-        self.assertTrue(all(ANOMALY_HINTS.values()), "every hint must be non-empty")
+                       "hook-pingpong", "agent-kill", "orphan-subagent", "compaction-churn",
+                       "stall", "rejection-persist"}
+        for kind in known_kinds:
+            with self.subTest(kind):
+                entry = lookup(kind)
+                self.assertIsNotNone(entry)
+                self.assertTrue(entry.hint)
 
 
 def _kinds(session: ParsedSession) -> list[str]:
