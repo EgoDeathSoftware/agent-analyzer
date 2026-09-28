@@ -166,6 +166,28 @@ class EndStateTest(unittest.TestCase):
         session.messages.append(Message(uuid="a1", line=3, ts="", role="assistant"))
         self.assertEqual(derive_end_state(session)[0], "complete")
 
+    def test_aborted_final_turn(self) -> None:
+        from sessionkit.parse import Message
+        session = _session()
+        session.messages.append(Message(uuid="u", line=2, ts="", role="assistant",
+                                        stop_reason="aborted"))
+        self.assertEqual(derive_end_state(session)[0], "aborted")
+
+    def test_output_truncated_final_turn(self) -> None:
+        from sessionkit.parse import Message
+        session = _session()
+        session.messages.append(Message(uuid="u", line=2, ts="", role="assistant",
+                                        stop_reason="length"))
+        self.assertEqual(derive_end_state(session)[0], "output-truncated")
+
+    def test_agent_unresponsive(self) -> None:
+        from sessionkit.parse import Message
+        session = _session()
+        session.messages.extend([
+            Message(uuid="a", line=83, ts="", role="assistant", stop_reason="aborted"),
+            Message(uuid="u", line=84, ts="", role="user", text_len=5, preview="hello")])
+        self.assertEqual(derive_end_state(session)[0], "agent-unresponsive")
+
 
 class DetectorTest(unittest.TestCase):
     """Each detector fires on its pattern and stays silent otherwise."""
@@ -236,7 +258,7 @@ class DetectorTest(unittest.TestCase):
 
     def test_stall(self) -> None:
         session = _session()
-        session.tools.append(_call(1, dur=200_000))
+        session.tools.append(_call(1, name="Read", dur=200_000))
         self.assertIn("stall", _kinds(session))
 
     def test_stall_negative_fast_call(self) -> None:

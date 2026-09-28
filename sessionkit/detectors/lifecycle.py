@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 from sessionkit.detectors.base import MAX_LINES, Anomaly
-from sessionkit.harness import role
-from sessionkit.parse import ParsedSession
+from sessionkit.harness import declared_timeout_ms, is_interrupt_marker, role
+from sessionkit.parse import Message, ParsedSession, ToolCall
 from sessionkit.taxonomy import THRESHOLDS
 
 
@@ -31,8 +31,80 @@ def compaction_churn(session: ParsedSession) -> list[Anomaly]:
     return []
 
 
+#: Their duration measures a human or a background job, not the tool.
+_NO_STALL_ROLES = ("ask-user", "dispatch", "poll", "edit", "write")
+
+
 def stalls(session: ParsedSession) -> list[Anomaly]:
-    """Individual tool calls that ran far longer than the threshold."""
-    limit = THRESHOLDS["stall_ms"]
-    slow = [c for c in session.tools if c.dur_ms is not None and c.dur_ms > limit]
-    return [Anomaly("stall", f"{c.name} took {c.dur_ms // 1000}s", 1, [c.line]) for c in slow]
+    """Tool calls that ran far longer than they should have (spec §2.2)."""
+    return [Anomaly("stall", f"{c.name} took {c.dur_ms // 1000}s", 1, [c.line])
+            for c in session.tools if c.dur_ms is not None and _is_stall(session.harness, c)]
+
+
+def _is_stall(harness: str, call: ToolCall) -> bool:
+    call_role = role(harness, call.name)
+    if call_role in _NO_STALL_ROLES:
+        return False
+    if call_role != "exec":
+        return call.dur_ms > THRESHOLDS["stall_ms"]
+    timeout = declared_timeout_ms(harness, call)
+    if timeout:
+        return call.dur_ms >= THRESHOLDS["stall_timeout_fraction"] * timeout
+    return call.dur_ms > THRESHOLDS["stall_exec_ms"]
+
+
+def hung(session: ParsedSession, live: bool) -> list[Anomaly]:
+    """A finished (not live) session that ended waiting on a call or an unfinished turn."""
+    if live:
+        return []
+    if session.end_state == "interrupted-tool":
+        pending = [c for c in session.tools if c.err_class == "no-result"
+                   and role(session.harness, c.name) not in ("ask-user", "dispatch")]
+        if pending:
+            return [Anomaly("hung", f"ended waiting on {pending[-1].name}", len(pending),
+                            [c.line for c in pending][:MAX_LINES])]
+    # Only pi persists an unfinished stream as an assistant message with no stop reason;
+    # Claude Code writes stop_reason null on every intermediate per-block record.
+    last = session.messages[-1] if session.messages else None
+    if session.harness == "pi" and last is not None and last.role == "assistant" \
+            and last.stop_reason == "":
+        return [Anomaly("hung", "final model turn never finished streaming", 1, [last.line])]
+    return []
+
+
+def abrupt_truncation(session: ParsedSession, live: bool) -> list[Anomaly]:
+    """The transcript's last line is a partial write and nothing is still writing it."""
+    if live or not session.last_line_malformed:
+        return []
+    return [Anomaly("abrupt-truncation", "last transcript line is a partial write", 1, [])]
+
+
+def interrupt_points(session: ParsedSession) -> list[int]:
+    """Lines where the user stopped the agent: an aborted turn or call, or Claude Code's
+    synthetic "[Request interrupted by user]" message."""
+    points = {m.line for m in session.messages
+              if m.role == "assistant" and m.stop_reason == "aborted"}
+    points |= {c.line for c in session.tools if c.err_class == "aborted"}
+    points |= {m.line for m in session.messages
+               if m.role == "user" and is_interrupt_marker(m.preview)}
+    return sorted(points)
+
+
+def _next_prompt(session: ParsedSession, after: int) -> Message | None:
+    return next((m for m in session.messages if m.role == "user" and m.line > after
+                 and m.text_len > 0 and not is_interrupt_marker(m.preview)), None)
+
+
+def user_interrupt(session: ParsedSession) -> list[Anomaly]:
+    """The user stopped the agent and then told it something new — a redirect."""
+    out: list[Anomaly] = []
+    seen: set[int] = set()
+    for point in interrupt_points(session):
+        redirect = _next_prompt(session, point)
+        if redirect is None or redirect.line in seen:
+            continue
+        seen.add(redirect.line)
+        out.append(Anomaly("user-interrupt",
+                           f"the user stopped the agent and redirected at line {redirect.line}",
+                           1, [point, redirect.line]))
+    return out

@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from sessionkit import parse_pi
+from sessionkit import live, parse_pi
 from sessionkit import sources as src
 from sessionkit.classify import annotate_errors, derive_end_state
 from sessionkit.detectors import Anomaly, detect
@@ -109,7 +109,8 @@ def _pi_transcripts(source: src.Source) -> list[tuple[Path, str]]:
     return found
 
 
-def load_one(source: src.Source, path: Path, dir_name: str) -> list[Loaded]:
+def load_one(source: src.Source, path: Path, dir_name: str,
+             live_sids: frozenset[str] = frozenset()) -> list[Loaded]:
     """Parse one transcript and derive everything the reports need from it.
 
     Returns one `Loaded` for a Claude Code/opencode transcript, or one `Loaded` for a pi
@@ -117,35 +118,37 @@ def load_one(source: src.Source, path: Path, dir_name: str) -> list[Loaded]:
     (parse_pi.py, spec Sec 4) — always at least one entry.
     """
     if source.kind == "pi":
-        return _load_pi(source, path, dir_name)
+        return _load_pi(source, path, dir_name, live_sids)
 
     session = parse_file(path, source.id)
     if source.location == "container":
         session.cwd = src.rewrite_cwd(session.cwd, source.origin)
     annotate_errors(session)
     session.end_state, session.end_reason = derive_end_state(session)
-    anomalies = detect(session)
+    anomalies = detect(session, session.sid in live_sids)
     # tail_signal is left unset here: query.tail_signal() memoises onto the session on first
     # real use, and only `sk tail`/`sk files` ever ask for it — every other command paid for
     # a re-read of each session's last 6 lines from disk for nothing.
     return [Loaded(session, project_key(session.cwd, source.id, dir_name), anomalies)]
 
 
-def _load_pi(source: src.Source, path: Path, dir_name: str) -> list[Loaded]:
+def _load_pi(source: src.Source, path: Path, dir_name: str,
+             live_sids: frozenset[str]) -> list[Loaded]:
     """A pi session plus its synthetic subagent children, or one pi-subagents async run."""
     parent = parse_pi.parse_file(path, source.id)
     meta = _mark_async_child(parent, path) if _is_async_run(path) else {}
     annotate_errors(parent)
     parent.end_state, parent.end_reason = derive_end_state(parent)
     _apply_exit_code(parent, meta)
-    loaded = [Loaded(parent, project_key(parent.cwd, source.id, dir_name), detect(parent))]
+    loaded = [Loaded(parent, project_key(parent.cwd, source.id, dir_name),
+                     detect(parent, parent.sid in live_sids))]
     for child in parent.child_sessions:
         annotate_errors(child)
         # end_state/end_reason were already assigned in parse_pi from the subagent result's
         # exitCode/stopReason — derive_end_state assumes a live tail of tool calls that a
         # synthetic child, built from an already-finished subprocess, does not have.
         loaded.append(Loaded(child, project_key(child.cwd, source.id, dir_name),
-                             detect(child)))
+                             detect(child, child.sid in live_sids)))
     return loaded
 
 
@@ -241,7 +244,9 @@ def load_session(prefix: str) -> Loaded | None:
     """
     needle = prefix.lower()
     found: list[Loaded] = []
-    for source in src.scannable(src.discover()):
+    sources = src.scannable(src.discover())
+    live_set = frozenset(live.live_sids({s.root for s in sources}))
+    for source in sources:
         for path, dir_name in transcripts(source):
             if source.kind != "pi":
                 stem = path.stem
@@ -249,7 +254,7 @@ def load_session(prefix: str) -> Loaded | None:
                 if not candidate.lower().startswith(needle):
                     continue
             try:
-                entries = load_one(source, path, dir_name)
+                entries = load_one(source, path, dir_name, live_set)
             except OSError:
                 continue
             for entry in entries:
@@ -272,12 +277,14 @@ def load(only: str | None = None) -> Corpus:
     """
     found = src.discover()
     corpus = Corpus(sources=found)
-    for source in src.scannable(found):
+    scannable = src.scannable(found)
+    live_set = frozenset(live.live_sids({s.root for s in scannable}))
+    for source in scannable:
         if only and source.id != only:
             continue
         for path, dir_name in transcripts(source):
             try:
-                corpus.sessions.extend(load_one(source, path, dir_name))
+                corpus.sessions.extend(load_one(source, path, dir_name, live_set))
             except OSError:
                 corpus.failed += 1
     _disambiguate(corpus.sessions)

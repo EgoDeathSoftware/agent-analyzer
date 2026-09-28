@@ -30,14 +30,17 @@ DETECTORS: list[Callable[[ParsedSession], list[Anomaly]]] = [
     generation.degeneration,
     generation.output_truncated,
     generation.generation_stall,
+    lifecycle.user_interrupt,
 ]
 
 
-def detect(session: ParsedSession) -> list[Anomaly]:
+def detect(session: ParsedSession, live: bool = False) -> list[Anomaly]:
     """Run every detector against a session.
 
     Args:
-        session: A session whose errors have already been annotated.
+        session: A session whose errors and end state have already been derived.
+        live: Whether the session is still running. A live session's unfinished tail is
+            expected, so the hang and truncation detectors stay silent for it.
 
     Returns:
         Anomalies sorted by count, most frequent first.
@@ -45,6 +48,8 @@ def detect(session: ParsedSession) -> list[Anomaly]:
     found: list[Anomaly] = []
     for detector in DETECTORS:
         found.extend(detector(session))
+    found.extend(lifecycle.hung(session, live))
+    found.extend(lifecycle.abrupt_truncation(session, live))
     return sorted(found, key=lambda a: -a.count)
 
 

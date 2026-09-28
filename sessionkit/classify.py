@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import re
 
-from sessionkit.parse import ParsedSession, ToolCall
+from sessionkit.parse import Message, ParsedSession, ToolCall
 from sessionkit.taxonomy import THRESHOLDS, classify_error, signature
 
 
@@ -29,9 +29,9 @@ def derive_end_state(session: ParsedSession) -> tuple[str, str]:
     """Decide how a session ended, and why.
 
     Returns:
-        ``(end_state, reason)`` where end_state is one of ``complete``,
-        ``interrupted-tool``, ``killed-agents``, ``error-cascade``, ``compacted-idle``,
-        ``interrupted-user`` or ``unknown``.
+        ``(end_state, reason)`` where end_state is one of ``complete``, ``interrupted-tool``,
+        ``killed-agents``, ``error-cascade``, ``aborted``, ``output-truncated``,
+        ``compacted-idle``, ``agent-unresponsive``, ``interrupted-user`` or ``unknown``.
     """
     orphans = [c for c in session.tools if c.err_class == "no-result"]
     if orphans:
@@ -41,19 +41,43 @@ def derive_end_state(session: ParsedSession) -> tuple[str, str]:
         return ("killed-agents", "a subagent was killed before returning")
     if trailing_errors(session.tools) >= THRESHOLDS["error_cascade"]:
         return ("error-cascade", "session ends on consecutive failing tool calls")
-    if session.messages and session.messages[-1].role == "assistant":
-        last = session.messages[-1]
-        if last.stop_reason == "error":
-            return ("error-cascade", last.error_text or "final model turn ended in an API error")
-        last_user_line = max(
-            (m.line for m in session.messages if m.role == "user"), default=-1)
-        if any(e.subtype == "compaction" and e.line > last_user_line
-               for e in session.sysev):
-            return ("compacted-idle", "went idle shortly after a context compaction")
-        return ("complete", "")
-    if session.messages and session.messages[-1].role == "user":
-        return ("interrupted-user", "last turn is a user message with no reply")
+    if not session.messages:
+        return ("unknown", "no messages parsed")
+    last = session.messages[-1]
+    if last.role == "assistant":
+        return _assistant_end(session, last)
+    if last.role == "user":
+        return _user_end(session)
     return ("unknown", "no messages parsed")
+
+
+_FINAL_STOPS = {
+    "aborted": ("aborted", "the final model turn was aborted"),
+    "length": ("output-truncated", "the final model turn hit the output token limit"),
+}
+
+
+def _assistant_end(session: ParsedSession, last: Message) -> tuple[str, str]:
+    if last.stop_reason == "error":
+        return ("error-cascade", last.error_text or "final model turn ended in an API error")
+    if last.stop_reason in _FINAL_STOPS:
+        return _FINAL_STOPS[last.stop_reason]
+    last_user_line = max(
+        (m.line for m in session.messages if m.role == "user"), default=-1)
+    if any(e.subtype == "compaction" and e.line > last_user_line for e in session.sysev):
+        return ("compacted-idle", "went idle shortly after a context compaction")
+    return ("complete", "")
+
+
+def _user_end(session: ParsedSession) -> tuple[str, str]:
+    """A session ending on a user message: did the user walk away, or did the agent stop
+    answering? The second blames the right party when the last model turn failed."""
+    prior = next((m for m in reversed(session.messages[:-1]) if m.role == "assistant"), None)
+    if prior is not None and prior.stop_reason in ("error", "aborted"):
+        return ("agent-unresponsive",
+                "the last user message followed an errored or aborted model turn and got no "
+                "reply")
+    return ("interrupted-user", "last turn is a user message with no reply")
 
 
 #: Precedence order — earlier entries win. Same shape as the error taxonomy's ordered rules:

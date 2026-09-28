@@ -34,6 +34,8 @@ THRESHOLDS: dict[str, float] = {
     "hook_pingpong": 2,     # hook blocks against the same tool
     "compaction_churn": 2,  # compaction events
     "stall_ms": 120_000,    # a single tool call taking longer than this
+    "stall_exec_ms": 600_000,        # a command with no declared timeout running this long
+    "stall_timeout_fraction": 0.9,   # a command reaching this share of its declared timeout
     "degeneration_ratio": 0.5,          # repeated word 8-grams within one message
     "generation_stall_ms": 600_000,     # a model turn slower than this ...
     "generation_stall_factor": 5,       # ... and this many times the session's median
@@ -274,6 +276,14 @@ FINDING_KINDS: tuple[FailureClass, ...] = (
           "One model turn took far longer than the session's norm — a runaway reasoning loop "
           "or an overloaded server. Check that turn's reasoning for repetition and the "
           "server's load at the time."),
+    _kind("hung", "lifecycle", TIER_S, "env",
+          "The session ended waiting on a call or a model turn that never finished — check the "
+          "tool or server that was pending."),
+    _kind("abrupt-truncation", "lifecycle", TIER_S, "none",
+          "The transcript ends in a partial write — the agent process died mid-record."),
+    _kind("user-interrupt", "lifecycle", TIER_S, "none",
+          "The user stopped the agent and redirected it — the work just before the interrupt "
+          "is the likely wrong turn."),
 )
 
 ALL_CLASSES: tuple[FailureClass, ...] = (*ERROR_CLASSES, KILLED, *API_ERROR_CLASSES,
