@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Callable
 
-from sessionkit.detectors import generation, lifecycle, loops, tool_protocol
+from sessionkit.detectors import alignment, generation, lifecycle, loops, recovery, tool_protocol
 from sessionkit.detectors.base import Anomaly
 from sessionkit.parse import ParsedSession
 
@@ -31,6 +31,11 @@ DETECTORS: list[Callable[[ParsedSession], list[Anomaly]]] = [
     generation.output_truncated,
     generation.generation_stall,
     lifecycle.user_interrupt,
+    recovery.error_ignored,
+    recovery.give_up,
+    alignment.scope_creep,
+    alignment.unverified_completion,
+    alignment.premature_stop,
 ]
 
 

@@ -285,6 +285,19 @@ FINDING_KINDS: tuple[FailureClass, ...] = (
     _kind("user-interrupt", "lifecycle", TIER_S, "none",
           "The user stopped the agent and redirected it — the work just before the interrupt "
           "is the likely wrong turn."),
+    _kind("error-ignored", "recovery", TIER_CANDIDATE, "model",
+          "A tool failed and the next message claims success — confirm whether the failure "
+          "was actually handled."),
+    _kind("give-up", "recovery", TIER_CANDIDATE, "model",
+          "The session stopped after a single failure that may have been recoverable."),
+    _kind("unverified-completion", "alignment", TIER_CANDIDATE, "harness",
+          "The agent claimed completion without running tests or a build after its last "
+          "change. Require verification in the instructions file."),
+    _kind("premature-stop", "alignment", TIER_CANDIDATE, "model",
+          "The session ends on a stated next step that never happened."),
+    _kind("scope-creep", "alignment", TIER_CANDIDATE, "harness",
+          "The ask was to review or explain, but files were changed. State read-only intent "
+          "explicitly in the ask or the instructions file."),
 )
 
 ALL_CLASSES: tuple[FailureClass, ...] = (*ERROR_CLASSES, KILLED, *API_ERROR_CLASSES,

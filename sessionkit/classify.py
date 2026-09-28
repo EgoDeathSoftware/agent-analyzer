@@ -136,6 +136,12 @@ def derive_tail_signal(session: ParsedSession, tail_texts: dict[int, str]) -> st
         return "neutral"
 
     text = tail_texts.get(last_msg.line, last_msg.preview or "")
+    return tail_text_signal(text)
+
+
+def tail_text_signal(text: str) -> str:
+    """Classify a final message's text alone: ``apology``, ``completion_marker``,
+    ``next_step_stated`` or ``neutral``."""
     if _APOLOGY_RE.search(text):
         return "apology"
     if _COMPLETION_RE.search(text):
