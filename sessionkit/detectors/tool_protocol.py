@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from sessionkit.detectors.base import MAX_LINES, Anomaly
+from sessionkit.detectors.base import MAX_LINES, Anomaly, assistant_turns
 from sessionkit.parse import ParsedSession
 from sessionkit.taxonomy import classify_api_error, lookup
 
@@ -34,9 +34,9 @@ def error_classes(session: ParsedSession) -> list[Anomaly]:
 
 
 def tool_text_leak(session: ParsedSession) -> list[Anomaly]:
-    """Assistant text carrying tool-call markup while no structured call was made."""
-    hits = [m for m in session.messages
-            if m.role == "assistant" and m.markup_leak and m.tool_calls == 0]
+    """A model message carrying tool-call markup while none of its records made a call."""
+    hits = [next(m for m in turn if m.markup_leak) for turn in assistant_turns(session)
+            if any(m.markup_leak for m in turn) and not any(m.tool_calls for m in turn)]
     if not hits:
         return []
     formats = ", ".join(sorted({m.markup_leak for m in hits}))

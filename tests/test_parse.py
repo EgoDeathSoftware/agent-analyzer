@@ -230,6 +230,16 @@ class ParseFeaturesTest(unittest.TestCase):
         ])
         self.assertEqual(session.model, "claude-opus-5")
 
+    def test_msg_id_is_the_api_message_id(self) -> None:
+        records = [fx.user("go")]
+        for ts, block in (("2026-08-01T00:00:01Z", {"type": "thinking", "thinking": "hm"}),
+                          ("2026-08-01T00:00:02Z", {"type": "text", "text": "ok"})):
+            record = fx.assistant([block], ts=ts, stop_reason="end_turn")
+            record["message"]["id"] = "msg_01"
+            records.append(record)
+        session = self.parse(records)
+        self.assertEqual([m.msg_id for m in session.messages], ["", "msg_01", "msg_01"])
+
     def test_tool_calls_counted(self) -> None:
         message = self._last(fx.tool_use("t1", "Read", {"file_path": "/a"}),
                              fx.tool_use("t2", "Read", {"file_path": "/b"}))

@@ -5,20 +5,21 @@ from __future__ import annotations
 import bisect
 import statistics
 
-from sessionkit.detectors.base import MAX_LINES, Anomaly
+from sessionkit.detectors.base import MAX_LINES, Anomaly, assistant_turns
 from sessionkit.features import parse_ts
 from sessionkit.parse import Message, ParsedSession
 from sessionkit.taxonomy import THRESHOLDS
 
 
 def empty_turn(session: ParsedSession) -> list[Anomaly]:
-    """A turn that ended normally with no visible text and no tool call.
+    """A model message that ended normally with no visible text and no tool call.
 
-    Requires ``stop_reason == "end"``: Claude Code's intermediate per-block records carry no
-    stop reason and legitimately hold only reasoning.
+    Judged per whole message: Claude Code writes a reasoning-only block record, carrying the
+    message's final stop reason, before the record that holds the text.
     """
-    hits = [m.line for m in session.messages if m.role == "assistant"
-            and m.stop_reason == "end" and m.tool_calls == 0 and m.text_len == 0]
+    hits = [turn[0].line for turn in assistant_turns(session)
+            if turn[-1].stop_reason == "end"
+            and not any(m.tool_calls or m.text_len for m in turn)]
     if not hits:
         return []
     return [Anomaly("empty-turn", "turn ended with no text and no tool call", len(hits),
@@ -37,9 +38,9 @@ def degeneration(session: ParsedSession) -> list[Anomaly]:
 
 
 def output_truncated(session: ParsedSession) -> list[Anomaly]:
-    """Turns cut off by the output token limit."""
-    hits = [m.line for m in session.messages
-            if m.role == "assistant" and m.stop_reason == "length"]
+    """Model messages cut off by the output token limit, counted once per message."""
+    hits = [turn[0].line for turn in assistant_turns(session)
+            if any(m.stop_reason == "length" for m in turn)]
     if not hits:
         return []
     return [Anomaly("output-truncated", "turn hit the output token limit", len(hits),

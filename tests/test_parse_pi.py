@@ -272,6 +272,10 @@ class ParsePiFeaturesTest(unittest.TestCase):
         self.assertTrue(last.claims_done)
         self.assertEqual(session.final_text, "Done.")
 
+    def test_msg_id_is_the_record_id(self) -> None:
+        last = self.parse(self._turn([{"type": "text", "text": "ok"}])).messages[-1]
+        self.assertEqual(last.msg_id, "e2")
+
     def test_stop_reason_mapping(self) -> None:
         for raw, expected in (("length", "length"), ("aborted", "aborted"),
                               ("toolUse", "tool_use"), ("pending", "")):

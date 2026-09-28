@@ -36,6 +36,21 @@ class ToolTextLeakTest(unittest.TestCase):
         s = df.session(messages=[df.msg(2, markup_leak="json-call", tool_calls=1)])
         self.assertNotIn("tool-text-leak", _kinds(s))
 
+    def test_claude_code_markup_with_the_call_in_a_sibling_record_is_not_a_leak(self) -> None:
+        s = df.session("claude-code", messages=[
+            df.msg(2, text="<tool_call>", markup_leak="xml-call", stop="tool_use",
+                   msg_id="msg_1"),
+            df.msg(3, stop="tool_use", tool_calls=1, msg_id="msg_1")])
+        self.assertNotIn("tool-text-leak", _kinds(s))
+
+    def test_claude_code_split_record_leak_cites_one_line(self) -> None:
+        s = df.session("claude-code", messages=[
+            df.msg(2, reasoning_len=50, markup_leak="xml-call", stop="end", msg_id="msg_1"),
+            df.msg(3, text="<tool_call>", markup_leak="xml-call", stop="end",
+                   msg_id="msg_1")])
+        leaks = [a for a in detect(s) if a.kind == "tool-text-leak"]
+        self.assertEqual([(a.count, a.lines) for a in leaks], [(1, [2])])
+
 
 class GenerationTest(unittest.TestCase):
     def test_empty_turn(self) -> None:
@@ -43,9 +58,25 @@ class GenerationTest(unittest.TestCase):
         self.assertIn("empty-turn", _kinds(s))
 
     def test_claude_code_intermediate_records_are_not_empty_turns(self) -> None:
-        s = df.session("claude-code", messages=[df.msg(2, stop="", reasoning_len=300),
-                                                df.msg(3, stop="tool_use", tool_calls=1)])
+        """Claude Code writes the final stop reason on every block record of one message."""
+        s = df.session("claude-code", messages=[
+            df.msg(2, stop="end", reasoning_len=300, msg_id="msg_1"),
+            df.msg(3, stop="end", text="Done.", msg_id="msg_1")])
         self.assertNotIn("empty-turn", _kinds(s))
+
+    def test_claude_code_empty_message_is_one_empty_turn(self) -> None:
+        s = df.session("claude-code", messages=[
+            df.msg(2, stop="end", reasoning_len=300, msg_id="msg_1"),
+            df.msg(3, stop="end", reasoning_len=20, msg_id="msg_1"),
+            df.msg(4, stop="end", reasoning_len=20, msg_id="msg_2")])
+        empties = [a for a in detect(s) if a.kind == "empty-turn"]
+        self.assertEqual([(a.count, a.lines) for a in empties], [(2, [2, 4])])
+
+    def test_records_without_a_message_id_are_their_own_turns(self) -> None:
+        s = df.session(messages=[df.msg(2, stop="end", reasoning_len=5),
+                                 df.msg(3, stop="end", text="ok")])
+        empties = [a for a in detect(s) if a.kind == "empty-turn"]
+        self.assertEqual([a.lines for a in empties], [[2]])
 
     def test_degeneration_includes_aborted_turns(self) -> None:
         s = df.session(messages=[df.msg(60, stop="aborted", repeat_ratio=0.85)])
@@ -58,6 +89,13 @@ class GenerationTest(unittest.TestCase):
     def test_output_truncated(self) -> None:
         s = df.session(messages=[df.msg(5, stop="length", text="partial")])
         self.assertIn("output-truncated", _kinds(s))
+
+    def test_output_truncated_counts_a_split_message_once(self) -> None:
+        s = df.session("claude-code", messages=[
+            df.msg(5, stop="length", reasoning_len=900, msg_id="msg_1"),
+            df.msg(6, stop="length", text="partial", msg_id="msg_1")])
+        found = [a for a in detect(s) if a.kind == "output-truncated"]
+        self.assertEqual([(a.count, a.lines) for a in found], [(1, [5])])
 
 
 class GenerationStallTest(unittest.TestCase):

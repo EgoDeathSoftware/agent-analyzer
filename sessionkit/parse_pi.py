@@ -153,7 +153,7 @@ class _Parser:
         if role == "user":
             self._user(line_no, ts, msg)
         elif role == "assistant":
-            self._assistant(line_no, ts, msg)
+            self._assistant(line_no, ts, msg, msg_id=str(rec.get("id") or ""))
         elif role == "toolResult":
             self._tool_result(line_no, ts, msg)
         elif role == "bashExecution":
@@ -173,7 +173,7 @@ class _Parser:
                                     text_len=len(text), preview=preview(text, MSG_PREVIEW),
                                     refs=features.extract_refs(text) if prompt else []))
 
-    def _assistant(self, line_no: int, ts: str, msg: dict[str, Any]) -> None:
+    def _assistant(self, line_no: int, ts: str, msg: dict[str, Any], msg_id: str = "") -> None:
         out = self.out
         model = str(msg.get("model") or "")
         usage = msg.get("usage") if isinstance(msg.get("usage"), dict) else {}
@@ -202,7 +202,7 @@ class _Parser:
             text_len=len(visible), preview=preview(visible, MSG_PREVIEW), stop_reason=stop,
             tool_calls=calls, reasoning_len=len(reasoning), error_text=error_text,
             markup_leak=features.markup_leak(full), repeat_ratio=features.repeat_ratio(full),
-            claims_done=features.claims_done(visible)))
+            claims_done=features.claims_done(visible), msg_id=msg_id))
         out.final_text = visible[-FINAL_TEXT_CHARS:]
         if isinstance(content, list):
             for block in content:

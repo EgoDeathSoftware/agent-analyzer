@@ -105,6 +105,9 @@ class Message:
     repeat_ratio: float = 0.0
     refs: list[str] = field(default_factory=list)
     claims_done: bool = False
+    #: The API message this record belongs to. Claude Code splits one message into several
+    #: per-block records that share it; pi writes one record per message. Empty when unknown.
+    msg_id: str = ""
 
 
 @dataclass
@@ -325,7 +328,7 @@ class _Parser:
             text_len=len(visible), preview=preview(visible, MSG_PREVIEW), stop_reason=stop,
             tool_calls=calls, reasoning_len=len(reasoning), error_text=error_text,
             markup_leak=features.markup_leak(full), repeat_ratio=features.repeat_ratio(full),
-            claims_done=features.claims_done(visible),
+            claims_done=features.claims_done(visible), msg_id=str(msg.get("id") or ""),
         ))
         out.final_text = visible[-FINAL_TEXT_CHARS:]
         self._tool_uses(line_no, ts, msg.get("content"))
