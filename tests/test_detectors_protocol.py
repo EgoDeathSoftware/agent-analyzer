@@ -90,6 +90,56 @@ class GenerationStallTest(unittest.TestCase):
         self.assertEqual(generation.assistant_latencies(s), [])
         self.assertNotIn("generation-stall", _kinds(s))
 
+    def test_claude_code_block_records_do_not_fire(self) -> None:
+        """Claude Code block records with normal gaps don't spuriously fire."""
+        messages = [df.msg(1, "user", text="go", at=df.ts(0))]
+        tools = []
+        line = 2
+        clock = 0.0
+        for _ in range(4):
+            clock += 90  # 1.5 minutes between turns
+            # First block of turn (intermediate, no stop_reason)
+            messages.append(df.msg(line, stop="", reasoning_len=100,
+                                   at=df.ts(clock)))
+            line += 1
+            # Second block (final with tool call)
+            messages.append(df.msg(line, stop="tool_use", tool_calls=1,
+                                   at=df.ts(clock + 0.1)))
+            tools.append(df.call(line, at=df.ts(clock + 0.1),
+                                result_at=df.ts(clock + 0.2)))
+            line += 1
+        s = df.session("claude-code", messages=messages, tools=tools)
+        self.assertNotIn("generation-stall", _kinds(s))
+
+    def test_claude_code_real_gap_before_first_block_fires(self) -> None:
+        """A large gap before Claude Code's first block record fires stall."""
+        messages = [df.msg(1, "user", text="go", at=df.ts(0))]
+        tools = []
+        line = 2
+        clock = 0.0
+        stalled_line = None
+        for turn in range(4):
+            if turn == 2:
+                clock += 1200  # 20 minutes before turn 3's first block
+            else:
+                clock += 90  # 1.5 minutes for other turns
+            # First block of turn (intermediate, no stop_reason)
+            messages.append(df.msg(line, stop="", reasoning_len=100,
+                                   at=df.ts(clock)))
+            if turn == 2:
+                stalled_line = line  # Mark this as the stalled message
+            line += 1
+            # Second block (final with tool call)
+            messages.append(df.msg(line, stop="tool_use", tool_calls=1,
+                                   at=df.ts(clock + 0.1)))
+            tools.append(df.call(line, at=df.ts(clock + 0.1),
+                                result_at=df.ts(clock + 0.2)))
+            line += 1
+        s = df.session("claude-code", messages=messages, tools=tools)
+        stalls = [a for a in detect(s) if a.kind == "generation-stall"]
+        self.assertEqual(len(stalls), 1)
+        self.assertEqual(stalls[0].lines, [stalled_line])
+
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
