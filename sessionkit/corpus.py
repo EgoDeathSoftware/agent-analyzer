@@ -10,8 +10,11 @@ Session JSONL is append-only, which is what makes this safe: nothing rewrites hi
 there is no invalidation problem and no consistency window to protect.
 
 This module owns the *post-parse pipeline*. ``parse_file`` alone returns a session with
-``end_state="unknown"``, no error classes and no anomalies; the four steps in :func:`load_one`
-are what turn it into something the reports can use.
+``end_state="unknown"``, no error classes and no anomalies; the steps in :func:`load_one`
+are what turn it into something the reports can use. ``load_one`` only has one transcript to
+work with, so its anomalies are the within-session detectors; a cross-session finding like
+``resource-interference``, which needs every session in a project at once, is added only once
+:func:`load` has parsed the whole corpus and called :func:`_add_cross_session_findings`.
 """
 
 from __future__ import annotations
@@ -32,10 +35,13 @@ from sessionkit.parse import ParsedSession, parse_file, project_key
 
 @dataclass
 class Loaded:
-    """One transcript, parsed and fully annotated.
+    """One transcript, parsed and annotated.
 
     ``project_key`` and ``anomalies`` are derived rather than parsed — they are not fields of
     :class:`~sessionkit.parse.ParsedSession` and only exist once :func:`load_one` has run.
+    ``anomalies`` holds only the within-session findings at that point; cross-session findings
+    such as ``resource-interference`` are appended in place by :func:`load`, once every
+    session in the corpus has been loaded and can be compared against its project siblings.
     """
 
     session: ParsedSession
