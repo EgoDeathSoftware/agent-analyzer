@@ -77,5 +77,50 @@ class UserTurnsTest(unittest.TestCase):
                          [(1, [2, 5]), (6, [7])])
 
 
+class FocusProfileTest(unittest.TestCase):
+    ASK = "fix the bug in sessionkit/parse.py"
+
+    def _session(self, tools, ask: str = ASK, **kw):
+        refs = ["sessionkit/parse.py"] if "sessionkit/parse.py" in ask else []
+        return df.session(messages=[df.msg(1, "user", text=ask, refs=refs)], tools=tools, **kw)
+
+    def test_consecutive_calls_on_one_key_form_one_run(self) -> None:
+        s = self._session([df.call(2, "read", {"path": "/repo/sessionkit/parse.py"}),
+                           df.call(3, "read", {"path": "/repo/sessionkit/corpus.py"}),
+                           df.call(4, "bash", {"command": "rg foo"})])
+        runs = alignment.focus_profile(s)[0].runs
+        self.assertEqual([(r.key, r.lines) for r in runs],
+                         [("dir:/repo/sessionkit", [2, 3]), ("exec:rg", [4])])
+        self.assertTrue(runs[0].referenced)
+
+    def test_a_large_unreferenced_run_is_a_drift_candidate(self) -> None:
+        tools = [df.call(2, "read", {"path": "/repo/sessionkit/parse.py"}),
+                 df.call(3, "edit", {"path": "/repo/sessionkit/parse.py"})]
+        tools += [df.call(i, "read", {"path": f"/usr/lib/node_modules/pkg/dist/{i}.js"})
+                  for i in range(4, 12)]
+        drift = [a for a in alignment.drift_candidates(self._session(tools))]
+        self.assertEqual([a.lines for a in drift], [list(range(4, 12))])
+
+    def test_asks_without_refs_produce_no_ref_based_candidates(self) -> None:
+        tools = [df.call(i, "read", {"path": f"/usr/lib/pkg/{i}.js"}) for i in range(2, 12)]
+        s = self._session(tools, ask="make the profiles switchable")
+        self.assertEqual(alignment.drift_candidates(s), [])
+
+    def test_a_user_interrupt_marks_the_calls_before_it(self) -> None:
+        tools = [df.call(i, "bash", {"command": f"rg x{i}"}) for i in range(2, 32, 2)]
+        s = df.session(messages=[df.msg(1, "user", text="set up two profiles"),
+                                 df.msg(33, stop="aborted"),
+                                 df.msg(34, "user", text="just write a script")], tools=tools)
+        drift = alignment.drift_candidates(s)
+        self.assertEqual([a.lines for a in drift], [[16, 18, 20, 22, 24, 26, 28, 30]])
+
+    def test_judgment_kinds_are_registered(self) -> None:
+        from sessionkit import taxonomy
+        for name in ("false-premise", "spec-neglect", "misread-output",
+                     "ignored-own-warning", "role-drift"):
+            with self.subTest(name):
+                self.assertEqual(taxonomy.lookup(name).tier, taxonomy.TIER_J)
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

@@ -36,6 +36,7 @@ DETECTORS: list[Callable[[ParsedSession], list[Anomaly]]] = [
     alignment.scope_creep,
     alignment.unverified_completion,
     alignment.premature_stop,
+    alignment.drift_candidates,
 ]
 
 
