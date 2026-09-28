@@ -758,7 +758,7 @@ def forensics_health(entry: Loaded) -> Row:
 # --- children ---------------------------------------------------------------------------
 
 def children_rows(entry: Loaded, corpus: Corpus) -> list[Row]:
-    """Every ``Agent`` dispatch from one session, resolved to its child via the exact
+    """Every dispatch-role call from one session, resolved to its child via the exact
     task-notification join (``parse.py``'s ``dispatch_edges``) — never by timestamp or dispatch
     order, which FIRSTRUN.md §8 found silently mispairs retries and non-adjacent completions.
 
@@ -787,7 +787,7 @@ def children_rows(entry: Loaded, corpus: Corpus) -> list[Row]:
 
 
 def _agent_description(tool: ToolCall) -> str:
-    """Best-effort dispatch description from an ``Agent`` call's input."""
+    """Best-effort dispatch description from a dispatch-role call's input."""
     try:
         parsed = json.loads(tool.input_preview)
     except (ValueError, TypeError):

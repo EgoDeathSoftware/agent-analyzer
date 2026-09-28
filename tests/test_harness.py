@@ -57,6 +57,16 @@ class PathTest(unittest.TestCase):
     def test_raw_bash_execution_command(self) -> None:
         self.assertEqual(harness.command_of(_call("bash", raw="ls -la /tmp")), "ls -la /tmp")
 
+    def test_raw_brace_group_command_is_not_mistaken_for_json(self) -> None:
+        call = _call("bash", raw="{ make; } 2>&1")
+        self.assertEqual(harness.command_of(call), "{ make; } 2>&1")
+
+    def test_truncated_multiline_command_is_unescaped(self) -> None:
+        raw = r'{"command": "cd /repo\npytest tests/a.py'
+        call = _call("bash", raw=raw)
+        self.assertEqual(harness.command_of(call), "cd /repo\npytest tests/a.py")
+        self.assertEqual(harness.call_paths("pi", call), ["/repo", "tests/a.py"])
+
     def test_urls_and_flags_are_not_paths(self) -> None:
         call = _call("bash", {"command": "curl -s https://x.dev/a/b -o out.json"})
         self.assertEqual(harness.call_paths("pi", call), ["out.json"])
@@ -69,6 +79,9 @@ class ProgramTest(unittest.TestCase):
         self.assertEqual(harness.command_program("sudo docker run x"), "docker")
         self.assertEqual(harness.command_program("/usr/local/bin/llama-swap --help"),
                          "llama-swap")
+
+    def test_multiline_command_splits_on_newline(self) -> None:
+        self.assertEqual(harness.command_program("cd /repo\ngit status"), "git")
 
     def test_run_key(self) -> None:
         self.assertEqual(harness.run_key("pi", _call("bash", {"command": "rg x"})), "exec:rg")

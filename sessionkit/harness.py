@@ -13,7 +13,7 @@ import posixpath
 import re
 from typing import Any
 
-from sessionkit.parse import ToolCall
+from sessionkit.parse import PATH_KEYS, ToolCall
 
 ROLES = ("read", "search", "edit", "write", "exec", "dispatch", "poll", "ask-user", "other")
 
@@ -46,7 +46,6 @@ _ANY_HARNESS: dict[str, str] = {
 
 #: Harnesses whose ``timeout`` argument is in seconds rather than milliseconds.
 _TIMEOUT_SECONDS = frozenset({"pi"})
-_PATH_KEYS = ("file_path", "notebook_path", "path")
 _PATH_RE = re.compile(r'"(?:file_path|notebook_path|path)"\s*:\s*"([^"]+)"')
 _COMMAND_RE = re.compile(r'"command"\s*:\s*"((?:[^"\\]|\\.)*)')
 _TOKEN_SPLIT = re.compile(r"[\s;|&<>()'\"]+")
@@ -88,9 +87,12 @@ def command_of(call: ToolCall) -> str:
         return value
     match = _COMMAND_RE.search(call.input_preview)
     if match:
-        return match.group(1)
+        try:
+            return json.loads(f'"{match.group(1)}"')
+        except (ValueError, UnicodeDecodeError):
+            return match.group(1)
     # pi's bashExecution records (user `!` commands) keep the raw command, not JSON.
-    return "" if call.input_preview.startswith("{") else call.input_preview
+    return "" if call.input_preview.startswith('{"') else call.input_preview
 
 
 def call_paths(harness: str, call: ToolCall) -> list[str]:
@@ -98,7 +100,7 @@ def call_paths(harness: str, call: ToolCall) -> list[str]:
     if role(harness, call.name) == "exec":
         return _command_paths(command_of(call))
     args = call_args(call)
-    for key in _PATH_KEYS:
+    for key in PATH_KEYS:
         value = args.get(key)
         if isinstance(value, str) and value:
             return [value]
@@ -120,7 +122,7 @@ def command_program(command: str) -> str:
     """The program a shell command runs, skipping ``cd x &&``, env assignments, ``$(...)``
     substitutions and wrappers such as ``sudo``."""
     cleaned = _SUBSTITUTION.sub("", command)
-    for segment in re.split(r"&&|\|\||;|\|", cleaned):
+    for segment in re.split(r"&&|\|\||;|\||\r\n|\n", cleaned):
         words = segment.split()
         while words and (_ENV_ASSIGN.match(words[0]) or words[0] in _WRAPPERS):
             words.pop(0)
