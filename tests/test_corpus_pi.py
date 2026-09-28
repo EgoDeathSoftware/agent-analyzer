@@ -182,3 +182,23 @@ class PiAsyncRunTest(unittest.TestCase):
         child = self._load()[1][CHILD_SID].session
         self.assertEqual(child.agent_type, "developer")
         self.assertEqual(child.end_state, "complete")
+
+    def test_parent_error_during_a_child_command_is_interference(self) -> None:
+        fx.write(self.pi_home, [
+            fx.header(), fx.user_msg("e1", None, "implement task 1"),
+            fx.assistant_msg("e2", "e1", [], stop_reason="error",
+                             error_message="Request timed out.", ts="2026-09-01T00:20:00.000Z"),
+        ])
+        child = [fx.header(sid=CHILD_SID),
+                 fx.session_info("i1", None, f"subagent-developer-{RUN_ID}-1"),
+                 fx.user_msg("e1", "i1", "Task 1"),
+                 fx.assistant_msg("e2", "e1", [fx.tool_call_block(
+                     "b1", "bash", {"command": "bash bench.sh"})], stop_reason="toolUse",
+                     ts="2026-09-01T00:10:00.000Z"),
+                 fx.tool_result_msg("e3", "e2", "b1", "bash", "ok",
+                                    ts="2026-09-01T00:40:00.000Z"),
+                 fx.assistant_msg("e4", "e3", [{"type": "text", "text": "finished"}],
+                                  ts="2026-09-01T00:41:00.000Z")]
+        fx.write_async_run(self.pi_home, fx.PARENT_FILE, FOLDER, child)
+        parent = self._load()[1][fx.SID]
+        self.assertIn("resource-interference", [a.kind for a in parent.anomalies])

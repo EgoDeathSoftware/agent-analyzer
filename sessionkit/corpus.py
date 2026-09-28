@@ -26,6 +26,7 @@ from sessionkit import live, parse_pi
 from sessionkit import sources as src
 from sessionkit.classify import annotate_errors, derive_end_state
 from sessionkit.detectors import Anomaly, detect
+from sessionkit.detectors.interference import resource_interference
 from sessionkit.parse import ParsedSession, parse_file, project_key
 
 
@@ -211,6 +212,13 @@ def _link_async_runs(sessions: list[Loaded]) -> None:
                 for call, child in edges]
 
 
+def _add_cross_session_findings(sessions: list[Loaded]) -> None:
+    """Findings that need several sessions at once (spec §2.2 ``resource-interference``)."""
+    pairs = [(entry.project_key, entry.session) for entry in sessions]
+    for entry, extra in zip(sessions, resource_interference(pairs)):
+        entry.anomalies.extend(extra)
+
+
 def _disambiguate(sessions: list[Loaded]) -> None:
     """Suffix a session id already claimed by a *different* transcript.
 
@@ -289,4 +297,5 @@ def load(only: str | None = None) -> Corpus:
                 corpus.failed += 1
     _disambiguate(corpus.sessions)
     _link_async_runs(corpus.sessions)
+    _add_cross_session_findings(corpus.sessions)
     return corpus

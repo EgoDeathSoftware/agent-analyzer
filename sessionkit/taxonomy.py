@@ -42,6 +42,7 @@ THRESHOLDS: dict[str, float] = {
     "drift_min_calls": 8,         # an unreferenced run needs at least this many calls ...
     "drift_min_share": 0.4,       # ... and this share of its turn's calls
     "interrupt_drift_calls": 8,   # calls cited before a user interrupt
+    "interference_exec_ms": 120_000,  # a concurrent command at least this long can interfere
 }
 
 
@@ -318,6 +319,10 @@ FINDING_KINDS: tuple[FailureClass, ...] = (
     _kind("role-drift", "alignment", TIER_J, "harness",
           "An orchestrator did its delegate's work in parallel with the delegate, duplicating "
           "effort and competing for shared resources."),
+    _kind("resource-interference", "environment", TIER_CANDIDATE, "harness",
+          "Model errors coincided with another session's long-running command in the same "
+          "project — check whether that command used the resource the failing session depends "
+          "on (for example, the model server)."),
 )
 
 ALL_CLASSES: tuple[FailureClass, ...] = (*ERROR_CLASSES, KILLED, *API_ERROR_CLASSES,
