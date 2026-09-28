@@ -21,7 +21,7 @@ tests and commands.
 |---|---|---|---|---|
 | 1 | [`2026-09-27-agent-postmortem-01-foundation.md`](2026-09-27-agent-postmortem-01-foundation.md) | 1, 2 | `taxonomy.py`, `harness.py` and the `detectors/` package replace the monolithic `classify.py`, with no behavior change. | done |
 | 2 | [`2026-09-27-agent-postmortem-02-parsers.md`](2026-09-27-agent-postmortem-02-parsers.md) | 3, 4, 5, 6 | Parse-time features and new `Message`/`ParsedSession` fields in both parsers; the pi and Claude Code parser bugs are fixed; pi-subagents async runs are loaded and linked. | done |
-| 3 | [`2026-09-27-agent-postmortem-03-detectors-core.md`](2026-09-27-agent-postmortem-03-detectors-core.md) | 7, 8, 9, 10 | The new and widened error classes; the tool-protocol, generation, loop and lifecycle detectors; the new end states; liveness passed into the detectors. | todo |
+| 3 | [`2026-09-27-agent-postmortem-03-detectors-core.md`](2026-09-27-agent-postmortem-03-detectors-core.md) | 7, 8, 9, 10 | The new and widened error classes; the tool-protocol, generation, loop and lifecycle detectors; the new end states; liveness passed into the detectors. | done |
 | 4 | [`2026-09-27-agent-postmortem-04-detectors-judgment.md`](2026-09-27-agent-postmortem-04-detectors-judgment.md) | 11, 12, 13 | The recovery and alignment candidates, the focus profile, drift candidates, resource interference, and the registry completeness tests. | todo |
 | 5 | [`2026-09-27-agent-postmortem-05-cli.md`](2026-09-27-agent-postmortem-05-cli.md) | 14, 15 | `sk forensics` as the post-mortem report; `sk findings` with rates; `errors --group-by model\|harness`; `index --finding`. | todo |
 | 6 | [`2026-09-27-agent-postmortem-06-skills-validation.md`](2026-09-27-agent-postmortem-06-skills-validation.md) | 16, 17, 18 | The failure-class knowledge base, the post-mortem and fleet skills, the README, corpus acceptance, the dry-run regression and real pi sessions. | todo |
@@ -34,10 +34,10 @@ tests and commands.
 - [x] **T4** (CP2) Data-model fields, populated by the Claude Code parser — commit: `9dc6531`
 - [x] **T5** (CP2) The pi parser populates the same fields, and end state reads `stop_reason` — commit: `32b4354`
 - [x] **T6** (CP2) Load pi-subagents async child runs and link them to their parent — commit: `ac5c5c5`
-- [ ] **T7** (CP3) New and widened error classes, and API-error classification — commit: `—`
-- [ ] **T8** (CP3) Tool-protocol and generation detectors — commit: `—`
-- [ ] **T9** (CP3) Loop detectors (new and retuned) — commit: `—`
-- [ ] **T10** (CP3) Lifecycle detectors, end states, and liveness plumbing — commit: `—`
+- [x] **T7** (CP3) New and widened error classes, and API-error classification — commit: `eb3a40f`
+- [x] **T8** (CP3) Tool-protocol and generation detectors — commit: `0d71491`
+- [x] **T9** (CP3) Loop detectors (new and retuned) — commit: `5435d42`
+- [x] **T10** (CP3) Lifecycle detectors, end states, and liveness plumbing — commit: `68a85e5`
 - [ ] **T11** (CP4) Recovery and alignment candidates — commit: `—`
 - [ ] **T12** (CP4) Focus profile and drift candidates — commit: `—`
 - [ ] **T13** (CP4) Cross-session resource interference, and registry completeness — commit: `—`
@@ -131,3 +131,30 @@ tests and commands.
 5. **A pi-subagents run folder with a missing or malformed `meta.json`, or no
    `session_info` name,** must still load as a subagent linked to its parent (test in
    Task 6).
+- 2026-09-28 — CP3 done (commits eb3a40f, 0d71491, 5435d42, 68a85e5, plus fix-wave commits
+  d7a4148..fd5a7f3). 423/423 tests passing. A final review ran the detectors on the real local
+  corpus (1,229 Claude Code sessions) and found the plan's detectors misread Claude Code's
+  per-block records: Claude Code writes the final `stop_reason` on *every* block record of one
+  API message (a thinking-only record carries `end_turn` too), so `empty-turn` was ~98% false.
+  Fixed by two additive fields: `Message.msg_id` (records of one message are grouped by it in
+  `empty_turn`, `tool_text_leak`, `output_truncated` via `detectors.base.assistant_turns`) and
+  `Message.is_prompt` (only typed user prompts count as `user-interrupt` redirects). Also:
+  `<synthetic>` records are skipped and equal timestamps tie-break by line in
+  `assistant_latencies`; the plan's `This session is isolated in the worktree` policy-denied
+  pattern was restored; pi's trailing `Command exited/timed out/aborted` line is kept in long
+  tool-result previews; the `aborted` pattern is anchored to the end of the body.
+- 2026-09-28 — For CP4/CP5: group Claude Code records by `msg_id` for any per-turn measure
+  (CP5's median turn latency especially — per-block gaps drag the median down). `is_prompt` is
+  not yet used for `turns`/`first_prompt`/`refs`; harness-injected records still count there.
+- 2026-09-28 — For CP5: pi has no live-session registry, so `hung`/`abrupt-truncation` can fire
+  on a pi session that is still running; consider a recent-mtime heuristic. `<synthetic>`
+  Claude Code API-error records get no latency (they still surface as error-class findings).
+- 2026-09-28 — For CP6 (T16–T18): 110 of 350 Claude Code exec stalls ran past their own declared
+  timeout, i.e. time spent waiting on permission approval, not the command; `read-only-spiral`
+  fires in 128/1,229 Claude Code sessions, 94 of them subagents — retune (exempt runs ending in a
+  substantial answer, or read-only subagent types); the 4 `tool-text-leak` hits are prose that
+  discusses `<tool_call>` markup — tighten `features.markup_leak`; dry-run `01a0db1d` also yields
+  a `generation-stall` at line 54 (11 min vs a 100 s median) that the spec's expected list lacks;
+  `skills/unfinished-work/SKILL.md` doesn't know the `aborted`, `output-truncated` and
+  `agent-unresponsive` end states; unify the `_EXIT_CODES` killed/timeout hint text with the
+  taxonomy entries (deferred from CP3).
