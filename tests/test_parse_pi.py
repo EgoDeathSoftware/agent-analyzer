@@ -308,6 +308,11 @@ class ParsePiFeaturesTest(unittest.TestCase):
         last = self.parse(self._turn([{"type": "text", "text": "ok"}])).messages[-1]
         self.assertEqual(last.msg_id, "e2")
 
+    def test_user_messages_are_prompts(self) -> None:
+        session = self.parse(self._turn([{"type": "text", "text": "ok"}]))
+        self.assertEqual([(m.role, m.is_prompt) for m in session.messages],
+                         [("user", True), ("assistant", False)])
+
     def test_stop_reason_mapping(self) -> None:
         for raw, expected in (("length", "length"), ("aborted", "aborted"),
                               ("toolUse", "tool_use"), ("pending", "")):

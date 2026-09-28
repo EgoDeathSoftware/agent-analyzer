@@ -78,6 +78,14 @@ class UserInterruptTest(unittest.TestCase):
             df.msg(6, "user", text="no, do it this way")])
         self.assertEqual([a.lines for a in lifecycle.user_interrupt(s)], [[5, 6]])
 
+    def test_non_prompt_user_records_are_not_the_redirect(self) -> None:
+        s = df.session("claude-code", messages=[
+            df.msg(1, "user", text="go"),
+            df.msg(5, "user", text="[Request interrupted by user]"),
+            df.msg(6, "user", text="<local-command-caveat>Caveat: ...", is_prompt=False),
+            df.msg(7, "user", text="no, do it this way")])
+        self.assertEqual([a.lines for a in lifecycle.user_interrupt(s)], [[5, 7]])
+
     def test_one_redirect_is_reported_once(self) -> None:
         s = df.session(tools=[df.call(32, is_error=True, err_class="aborted")],
                        messages=[df.msg(33, stop="aborted"), df.msg(34, "user", text="stop")])

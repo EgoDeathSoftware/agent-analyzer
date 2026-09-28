@@ -187,7 +187,8 @@ class _Parser:
                 out.first_prompt = preview(text, MSG_PREVIEW)
         out.messages.append(Message(uuid=f"u-{line_no}", line=line_no, ts=ts, role="user",
                                     text_len=len(text), preview=preview(text, MSG_PREVIEW),
-                                    refs=features.extract_refs(text) if prompt else []))
+                                    refs=features.extract_refs(text) if prompt else [],
+                                    is_prompt=prompt))
 
     def _assistant(self, line_no: int, ts: str, msg: dict[str, Any], msg_id: str = "") -> None:
         out = self.out

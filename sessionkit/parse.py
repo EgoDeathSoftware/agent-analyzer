@@ -47,8 +47,11 @@ FINAL_TEXT_CHARS = 4000
 #: the intermediate per-content-block records Claude Code writes — maps to "".
 _CC_STOP_REASONS = {"end_turn": "end", "stop_sequence": "end", "pause_turn": "end",
                     "refusal": "end", "tool_use": "tool_use", "max_tokens": "length"}
-#: The model name Claude Code writes on its own synthetic API-error messages.
+#: The model name Claude Code writes on its own records: API errors, resume notices.
 SYNTHETIC_MODEL = "<synthetic>"
+#: User records Claude Code writes itself, as opposed to text a person typed.
+_INJECTED_PREFIXES = ("<local-command-caveat>", "<task-notification>", "<command-name>",
+                      "<local-command-stdout>", "<system-reminder>")
 
 #: Tool name → file operation. Mirrors the tracker's own mapping.
 FILE_TOOLS = {
@@ -108,6 +111,8 @@ class Message:
     #: The API message this record belongs to. Claude Code splits one message into several
     #: per-block records that share it; pi writes one record per message. Empty when unknown.
     msg_id: str = ""
+    #: A user message a person typed, not a harness-injected record.
+    is_prompt: bool = False
 
 
 @dataclass
@@ -384,6 +389,7 @@ class _Parser:
             uuid=str(rec.get("uuid") or ""), line=line_no, ts=ts, role="user",
             text_len=len(text), preview=preview(text, MSG_PREVIEW),
             refs=features.extract_refs(text) if prompt else [],
+            is_prompt=prompt and not text.lstrip().startswith(_INJECTED_PREFIXES),
         ))
 
     def _tool_results(self, line_no: int, ts: str, content: Any) -> int:

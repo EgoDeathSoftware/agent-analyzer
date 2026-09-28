@@ -91,8 +91,8 @@ def interrupt_points(session: ParsedSession) -> list[int]:
 
 
 def _next_prompt(session: ParsedSession, after: int) -> Message | None:
-    return next((m for m in session.messages if m.role == "user" and m.line > after
-                 and m.text_len > 0 and not is_interrupt_marker(m.preview)), None)
+    return next((m for m in session.messages if m.is_prompt and m.line > after
+                 and not is_interrupt_marker(m.preview)), None)
 
 
 def user_interrupt(session: ParsedSession) -> list[Anomaly]:
