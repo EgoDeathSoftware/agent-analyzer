@@ -96,17 +96,18 @@ class GenerationStallTest(unittest.TestCase):
         tools = []
         line = 2
         clock = 0.0
+        # Build session: 4 turns, ~1.5 min between turns, ~3 sec between blocks
         for _ in range(4):
-            clock += 90  # 1.5 minutes between turns
+            clock += 1.5  # 1.5 minutes between turns
             # First block of turn (intermediate, no stop_reason)
             messages.append(df.msg(line, stop="", reasoning_len=100,
                                    at=df.ts(clock)))
             line += 1
-            # Second block (final with tool call)
+            # Second block (final with tool call); ~3 sec after first block
             messages.append(df.msg(line, stop="tool_use", tool_calls=1,
-                                   at=df.ts(clock + 0.1)))
-            tools.append(df.call(line, at=df.ts(clock + 0.1),
-                                result_at=df.ts(clock + 0.2)))
+                                   at=df.ts(clock + 0.05)))
+            tools.append(df.call(line, at=df.ts(clock + 0.05),
+                                result_at=df.ts(clock + 0.1)))
             line += 1
         s = df.session("claude-code", messages=messages, tools=tools)
         self.assertNotIn("generation-stall", _kinds(s))
@@ -118,22 +119,23 @@ class GenerationStallTest(unittest.TestCase):
         line = 2
         clock = 0.0
         stalled_line = None
+        # Build session: 4 turns, normal 1.5 min gap except turn 2 gets 20 min
         for turn in range(4):
             if turn == 2:
-                clock += 1200  # 20 minutes before turn 3's first block
+                clock += 20  # 20 minutes before turn 2's first block
             else:
-                clock += 90  # 1.5 minutes for other turns
+                clock += 1.5  # 1.5 minutes for other turns
             # First block of turn (intermediate, no stop_reason)
             messages.append(df.msg(line, stop="", reasoning_len=100,
                                    at=df.ts(clock)))
             if turn == 2:
                 stalled_line = line  # Mark this as the stalled message
             line += 1
-            # Second block (final with tool call)
+            # Second block (final with tool call); ~3 sec after first block
             messages.append(df.msg(line, stop="tool_use", tool_calls=1,
-                                   at=df.ts(clock + 0.1)))
-            tools.append(df.call(line, at=df.ts(clock + 0.1),
-                                result_at=df.ts(clock + 0.2)))
+                                   at=df.ts(clock + 0.05)))
+            tools.append(df.call(line, at=df.ts(clock + 0.05),
+                                result_at=df.ts(clock + 0.1)))
             line += 1
         s = df.session("claude-code", messages=messages, tools=tools)
         stalls = [a for a in detect(s) if a.kind == "generation-stall"]
