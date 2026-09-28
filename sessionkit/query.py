@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePath
 from typing import Any, Callable, Iterable
 
-from sessionkit import pricing, settingsjson as sj
+from sessionkit import features, pricing, settingsjson as sj
 from sessionkit.taxonomy import lookup, signature
 from sessionkit.corpus import Corpus, Loaded
 from sessionkit.harness import role
@@ -375,7 +375,7 @@ def tail_context(entry: Loaded, n: int = 6) -> dict[int, str]:
         if record is not None:
             content = ((record.get("message") or {}).get("content")
                        if isinstance(record.get("message"), dict) else None)
-            text = parse.block_text(content) if content is not None else ""
+            text = features.split_content(content, "")[0] if content is not None else ""
         result[message.line] = text or (message.preview or "")
     return result
 

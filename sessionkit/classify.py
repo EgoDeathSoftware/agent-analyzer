@@ -54,7 +54,7 @@ def derive_end_state(session: ParsedSession) -> tuple[str, str]:
         api_error = _final_api_error(session)
         if api_error is not None:
             return ("error-cascade", api_error.detail or "final model turn ended in an API error")
-        if any(e.subtype == "compact_boundary" for e in session.sysev[-5:]):
+        if any(e.subtype == "compaction" for e in session.sysev[-5:]):
             return ("compacted-idle", "went idle shortly after a context compaction")
         return ("complete", "")
     if session.messages and session.messages[-1].role == "user":

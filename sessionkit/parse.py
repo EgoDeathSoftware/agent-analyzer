@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from sessionkit import pricing
+from sessionkit import features, pricing
 from sessionkit.redact import preview
 
 MSG_PREVIEW = 200
@@ -36,6 +36,16 @@ MSG_PREVIEW = 200
 #: display-time cap, which *does* mark what it cuts.
 INPUT_PREVIEW = 2000
 OUTPUT_PREVIEW = 2000
+ERROR_PREVIEW = 300
+#: The last assistant message's visible text, kept from its end, so tail-signal and
+#: completion-claim checks see markers past the 200-char preview without re-reading the file.
+FINAL_TEXT_CHARS = 4000
+#: Claude Code ``stop_reason`` → the harness-neutral vocabulary (spec §4). ``null`` — normal on
+#: the intermediate per-content-block records Claude Code writes — maps to "".
+_CC_STOP_REASONS = {"end_turn": "end", "stop_sequence": "end", "pause_turn": "end",
+                    "refusal": "end", "tool_use": "tool_use", "max_tokens": "length"}
+#: The model name Claude Code writes on its own synthetic API-error messages.
+_SYNTHETIC_MODEL = "<synthetic>"
 
 #: Tool name → file operation. Mirrors the tracker's own mapping.
 FILE_TOOLS = {
@@ -84,6 +94,14 @@ class Message:
     tok_cc: int = 0
     text_len: int = 0
     preview: str = ""
+    stop_reason: str = ""
+    tool_calls: int = 0
+    reasoning_len: int = 0
+    error_text: str = ""
+    markup_leak: str = ""
+    repeat_ratio: float = 0.0
+    refs: list[str] = field(default_factory=list)
+    claims_done: bool = False
 
 
 @dataclass
@@ -156,6 +174,8 @@ class ParsedSession:
     #: for Claude Code / opencode sessions. See parse_pi.py's `_subagent_children`.
     child_sessions: list["ParsedSession"] = field(default_factory=list)
     tail_signal: str = ""
+    last_line_malformed: bool = False
+    final_text: str = ""
 
 
 def basename_of(path: str) -> str:
@@ -240,7 +260,8 @@ class _Parser:
     """Accumulates one file's records into a :class:`ParsedSession`."""
 
     def __init__(self, path: Path, source_id: str, sid: str) -> None:
-        self.out = ParsedSession(sid=sid, source_id=source_id, path=str(path))
+        self.out = ParsedSession(sid=sid, source_id=source_id, path=str(path),
+                                 harness="claude-code")
         self.pending: dict[str, ToolCall] = {}
 
     def feed(self, line_no: int, rec: dict[str, Any]) -> None:
@@ -281,7 +302,7 @@ class _Parser:
                 out.ended_at = ts
 
     def _assistant(self, line_no: int, rec: dict[str, Any]) -> None:
-        """Record an assistant turn: usage, text preview, and any tool_use blocks."""
+        """Record an assistant turn: usage, visible text vs reasoning, and tool_use blocks."""
         msg = rec.get("message")
         if not isinstance(msg, dict):
             return
@@ -299,15 +320,25 @@ class _Parser:
         out.tok_cache_read += tok_cr
         out.tok_cache_create += tok_cc
         out.cost_usd += pricing.cost(model, tok_in, tok_out, tok_cr, tok_cc)
-        if model:
+        if model and model != _SYNTHETIC_MODEL:
             out.model = model
 
-        text = block_text(msg.get("content"))
+        visible, reasoning, calls = features.split_content(msg.get("content"), "tool_use")
+        stop = _CC_STOP_REASONS.get(str(msg.get("stop_reason") or ""), "")
+        error_text = ""
+        if rec.get("isApiErrorMessage"):
+            stop = "error"
+            error_text = preview(f"{rec.get('error') or 'api_error'}: {visible}", ERROR_PREVIEW)
+        full = f"{visible}\n{reasoning}"
         out.messages.append(Message(
             uuid=str(rec.get("uuid") or ""), line=line_no, ts=ts, role="assistant",
             model=model, tok_in=tok_in, tok_out=tok_out, tok_cr=tok_cr, tok_cc=tok_cc,
-            text_len=len(text), preview=preview(text, MSG_PREVIEW),
+            text_len=len(visible), preview=preview(visible, MSG_PREVIEW), stop_reason=stop,
+            tool_calls=calls, reasoning_len=len(reasoning), error_text=error_text,
+            markup_leak=features.markup_leak(full), repeat_ratio=features.repeat_ratio(full),
+            claims_done=features.claims_done(visible),
         ))
+        out.final_text = visible[-FINAL_TEXT_CHARS:]
         self._tool_uses(line_no, ts, msg.get("content"))
 
     def _tool_uses(self, line_no: int, ts: str, content: Any) -> None:
@@ -352,13 +383,15 @@ class _Parser:
             return  # a results-only turn is transport, not a prompt
 
         text = block_text(content)
-        if not rec.get("isMeta") and text.strip():
+        prompt = not rec.get("isMeta") and bool(text.strip())
+        if prompt:
             self.out.turns += 1
             if not self.out.first_prompt:
                 self.out.first_prompt = preview(text, MSG_PREVIEW)
         self.out.messages.append(Message(
             uuid=str(rec.get("uuid") or ""), line=line_no, ts=ts, role="user",
             text_len=len(text), preview=preview(text, MSG_PREVIEW),
+            refs=features.extract_refs(text) if prompt else [],
         ))
 
     def _tool_results(self, line_no: int, ts: str, content: Any) -> int:
@@ -389,6 +422,7 @@ class _Parser:
         if subtype == "turn_duration":
             detail = str(rec.get("durationMs") or "")
         elif subtype == "compact_boundary":
+            subtype = "compaction"
             meta = rec.get("compactMetadata")
             if isinstance(meta, dict):
                 detail = f"{meta.get('trigger', '?')}:{meta.get('preTokens', 0)}"
@@ -440,6 +474,7 @@ def parse_file(path: Path, source_id: str) -> ParsedSession:
     parser = _Parser(path, source_id, path.stem)
     sid_seen = ""
     agent_seen = ""
+    last_malformed = False
     try:
         handle = path.open("r", encoding="utf-8", errors="replace")
     except OSError:
@@ -453,10 +488,13 @@ def parse_file(path: Path, source_id: str) -> ParsedSession:
                 rec = json.loads(line)
             except json.JSONDecodeError:
                 parser.out.malformed_lines += 1
+                last_malformed = True
                 continue
             if not isinstance(rec, dict):
                 parser.out.malformed_lines += 1
+                last_malformed = True
                 continue
+            last_malformed = False
             sid_seen = sid_seen or str(rec.get("sessionId") or "")
             agent_seen = agent_seen or str(rec.get("agentId") or "")
             parser.feed(line_no, rec)
@@ -464,6 +502,7 @@ def parse_file(path: Path, source_id: str) -> ParsedSession:
                 for task_id, tool_use_id in _TASK_NOTIF_RE.findall(_flatten_strings(rec)):
                     parser.out.dispatch_edges.append((tool_use_id.strip(), task_id.strip()))
     out = parser.finish()
+    out.last_line_malformed = last_malformed
     # A subagent is identified by its agentId; its sessionId belongs to the parent.
     out.sid = agent_seen or sid_seen or out.sid
     if out.is_subagent:

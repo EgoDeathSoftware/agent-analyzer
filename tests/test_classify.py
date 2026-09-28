@@ -200,12 +200,12 @@ class DetectorTest(unittest.TestCase):
 
     def test_compaction_churn(self) -> None:
         session = _session()
-        session.sysev.extend(SysEvent(i, "", "compact_boundary") for i in range(2))
+        session.sysev.extend(SysEvent(i, "", "compaction") for i in range(2))
         self.assertIn("compaction-churn", _kinds(session))
 
     def test_compaction_churn_negative_single(self) -> None:
         session = _session()
-        session.sysev.append(SysEvent(1, "", "compact_boundary"))
+        session.sysev.append(SysEvent(1, "", "compaction"))
         self.assertNotIn("compaction-churn", _kinds(session))
 
     def test_stall(self) -> None:

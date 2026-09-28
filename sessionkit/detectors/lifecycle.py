@@ -24,7 +24,7 @@ def agent_trouble(session: ParsedSession) -> list[Anomaly]:
 
 def compaction_churn(session: ParsedSession) -> list[Anomaly]:
     """Repeated context compaction — the session outgrew its window more than once."""
-    lines = [e.line for e in session.sysev if e.subtype == "compact_boundary"]
+    lines = [e.line for e in session.sysev if e.subtype == "compaction"]
     if len(lines) >= THRESHOLDS["compaction_churn"]:
         return [Anomaly("compaction-churn", "context compacted repeatedly", len(lines),
                         lines[:MAX_LINES])]
