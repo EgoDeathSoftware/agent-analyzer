@@ -287,11 +287,14 @@ class ParsePiFeaturesTest(unittest.TestCase):
         self.assertIn("context_edit", [e.subtype for e in session.sysev])
 
     def test_compaction_usage_is_counted(self) -> None:
-        usage = {"input": 1000, "output": 200, "cost": {"total": 0.05}}
+        usage = {"input": 1000, "output": 200, "cacheRead": 50_000, "cacheWrite": 300,
+                 "cost": {"total": 0.05}}
         session = self.parse([fx.header(), fx.user_msg("e1", None, "go"),
                               fx.compaction("e2", "e1", "summary", 90_000, usage=usage)])
         self.assertAlmostEqual(session.cost_usd, 0.05)
         self.assertEqual(session.tok_in, 1000)
+        self.assertEqual(session.tok_cache_read, 50_000)
+        self.assertEqual(session.tok_cache_create, 300)
 
     def test_harness_and_refs(self) -> None:
         session = self.parse([fx.header(), fx.user_msg("e1", None, "update @config/models.json")])

@@ -45,7 +45,10 @@ def derive_end_state(session: ParsedSession) -> tuple[str, str]:
         last = session.messages[-1]
         if last.stop_reason == "error":
             return ("error-cascade", last.error_text or "final model turn ended in an API error")
-        if any(e.subtype == "compaction" for e in session.sysev[-5:]):
+        last_user_line = max(
+            (m.line for m in session.messages if m.role == "user"), default=-1)
+        if any(e.subtype == "compaction" and e.line > last_user_line
+               for e in session.sysev):
             return ("compacted-idle", "went idle shortly after a context compaction")
         return ("complete", "")
     if session.messages and session.messages[-1].role == "user":

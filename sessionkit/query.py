@@ -335,7 +335,9 @@ def full_message(entry: Loaded, message: Any) -> str:
     if rec is None:
         return message.preview
     content = (rec.get("message") or {}).get("content")
-    return redact(block_text(content)) if content is not None else message.preview
+    if content is None:
+        return message.preview
+    return redact(features.split_content(content, "")[0])
 
 
 def message_rows(entry: Loaded, lo: int, hi: int, full: bool = False) -> list[Row]:

@@ -28,6 +28,7 @@ CLAIM_RE = re.compile(
     r"|task (?:is )?complete|everything (?:works|is working))\b"
     r"|(?m:^\s*(?:all )?done[.!]?\s*$)|✅", re.I)
 
+_URL = re.compile(r"https?://\S+")
 _REF_BACKTICK = re.compile(r"`([^`\n]{2,120})`")
 _REF_PATH = re.compile(r"(?<![\w/])@?((?:~|\.{1,2})?/?[\w.-]+(?:/[\w.-]+)+/?)")
 _REF_FILE = re.compile(
@@ -95,9 +96,12 @@ def repeat_ratio(text: str) -> float:
 
 
 def extract_refs(text: str) -> list[str]:
-    """Paths, backticked identifiers and filenames a user message names, first-seen order."""
-    # Remove URLs to avoid matching path components within them
-    text_without_urls = re.sub(r'https?://[\w.\-/#:?=&_]+', '', text)
+    """Paths, backticked identifiers and filenames a user message names, first-seen order.
+
+    URLs are excluded — stripped before matching so a path or filename embedded in a URL is
+    never mistaken for one the user named directly.
+    """
+    text_without_urls = _URL.sub("", text)
 
     found: list[str] = []
     for pattern in (_REF_BACKTICK, _REF_PATH):

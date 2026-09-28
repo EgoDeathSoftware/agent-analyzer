@@ -39,6 +39,9 @@ OUTPUT_PREVIEW = 2000
 ERROR_PREVIEW = 300
 #: The last assistant message's visible text, kept from its end, so tail-signal and
 #: completion-claim checks see markers past the 200-char preview without re-reading the file.
+#: Can be misleading: it is empty mid-session on a bare ``tool_use``-only content-block record
+#: (no visible text to keep), and on an API error it may hold Claude Code's synthetic
+#: "API Error: ..." message rather than real assistant output.
 FINAL_TEXT_CHARS = 4000
 #: Claude Code ``stop_reason`` → the harness-neutral vocabulary (spec §4). ``null`` — normal on
 #: the intermediate per-content-block records Claude Code writes — maps to "".
@@ -242,20 +245,6 @@ def digest(value: Any) -> str:
     return hashlib.sha1(canonical.encode("utf-8", "replace")).hexdigest()[:16]
 
 
-def _delta_ms(start: str, end: str) -> int | None:
-    """Milliseconds between two ISO-8601 timestamps, or ``None`` if either is unusable."""
-    from datetime import datetime
-
-    if not start or not end:
-        return None
-    try:
-        a = datetime.fromisoformat(start.replace("Z", "+00:00"))
-        b = datetime.fromisoformat(end.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    return int((b - a).total_seconds() * 1000)
-
-
 class _Parser:
     """Accumulates one file's records into a :class:`ParsedSession`."""
 
@@ -409,7 +398,7 @@ class _Parser:
             body = block_text(block.get("content"))
             call.result_ts = ts
             call.result_line = line_no
-            call.dur_ms = _delta_ms(call.ts, ts)
+            call.dur_ms = features.delta_ms(call.ts, ts)
             call.is_error = bool(block.get("is_error"))
             call.out_bytes = len(body)
             call.output_preview = preview(body, OUTPUT_PREVIEW)

@@ -147,6 +147,25 @@ class EndStateTest(unittest.TestCase):
                                         stop_reason="error", error_text="rate_limit: slow down"))
         self.assertEqual(derive_end_state(session), ("error-cascade", "rate_limit: slow down"))
 
+    def test_compaction_in_final_turn_is_compacted_idle(self) -> None:
+        """A compaction after the last user message — within the final turn — is a real signal."""
+        from sessionkit.parse import Message
+        session = _session()
+        session.messages.append(Message(uuid="u1", line=1, ts="", role="user"))
+        session.sysev.append(SysEvent(2, "", "compaction"))
+        session.messages.append(Message(uuid="a1", line=3, ts="", role="assistant"))
+        self.assertEqual(derive_end_state(session)[0], "compacted-idle")
+
+    def test_compaction_before_later_turns_is_complete(self) -> None:
+        """A compaction that happened before the last user message is stale — the session kept
+        going for more turns afterward, so it is not evidence of idling after compaction."""
+        from sessionkit.parse import Message
+        session = _session()
+        session.sysev.append(SysEvent(1, "", "compaction"))
+        session.messages.append(Message(uuid="u1", line=2, ts="", role="user"))
+        session.messages.append(Message(uuid="a1", line=3, ts="", role="assistant"))
+        self.assertEqual(derive_end_state(session)[0], "complete")
+
 
 class DetectorTest(unittest.TestCase):
     """Each detector fires on its pattern and stays silent otherwise."""

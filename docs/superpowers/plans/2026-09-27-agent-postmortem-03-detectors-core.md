@@ -1378,7 +1378,9 @@ def _assistant_end(session: ParsedSession, last: Message) -> tuple[str, str]:
         return ("error-cascade", last.error_text or "final model turn ended in an API error")
     if last.stop_reason in _FINAL_STOPS:
         return _FINAL_STOPS[last.stop_reason]
-    if any(e.subtype == "compaction" for e in session.sysev[-5:]):
+    last_user_line = max(
+        (m.line for m in session.messages if m.role == "user"), default=-1)
+    if any(e.subtype == "compaction" and e.line > last_user_line for e in session.sysev):
         return ("compacted-idle", "went idle shortly after a context compaction")
     return ("complete", "")
 

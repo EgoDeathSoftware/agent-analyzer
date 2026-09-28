@@ -62,20 +62,6 @@ def _text_of(content: Any) -> str:
     return "\n".join(p for p in parts if p)
 
 
-def _delta_ms(start: str, end: str) -> int | None:
-    """Milliseconds between two ISO-8601 timestamps, or ``None`` if either is unusable."""
-    from datetime import datetime
-
-    if not start or not end:
-        return None
-    try:
-        a = datetime.fromisoformat(start.replace("Z", "+00:00"))
-        b = datetime.fromisoformat(end.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    return int((b - a).total_seconds() * 1000)
-
-
 def _ms_to_iso(ms: Any) -> str:
     """Convert a pi-ai `Message.timestamp` (Unix ms) to the ISO string every other `ts` field
     in this module uses. Nested subagent messages carry this instead of an entry wrapper."""
@@ -150,6 +136,8 @@ class _Parser:
             return
         self.out.tok_in += int(usage.get("input") or 0)
         self.out.tok_out += int(usage.get("output") or 0)
+        self.out.tok_cache_read += int(usage.get("cacheRead") or 0)
+        self.out.tok_cache_create += int(usage.get("cacheWrite") or 0)
         cost = usage.get("cost")
         total = cost.get("total") if isinstance(cost, dict) else cost
         self.out.cost_usd += float(total or 0.0)
@@ -247,7 +235,7 @@ class _Parser:
         body = _text_of(msg.get("content"))
         call.result_ts = ts
         call.result_line = line_no
-        call.dur_ms = _delta_ms(call.ts, ts)
+        call.dur_ms = features.delta_ms(call.ts, ts)
         call.is_error = bool(msg.get("isError"))
         call.out_bytes = len(body)
         call.output_preview = preview(body, OUTPUT_PREVIEW)
