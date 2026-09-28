@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import re
 
-from sessionkit.parse import ParsedSession, SysEvent, ToolCall
+from sessionkit.parse import ParsedSession, ToolCall
 from sessionkit.taxonomy import THRESHOLDS, classify_error, signature
 
 
@@ -23,15 +23,6 @@ def annotate_errors(session: ParsedSession) -> None:
         cls, _hint = classify_error(call.output_preview)
         call.err_class = cls
         call.err_detail = signature(call.output_preview)
-
-
-def _final_api_error(session: ParsedSession) -> SysEvent | None:
-    """The ``api_error`` event raised by the session's last message, if that turn failed."""
-    last_line = session.messages[-1].line
-    for event in reversed(session.sysev):
-        if event.subtype == "api_error" and event.line == last_line:
-            return event
-    return None
 
 
 def derive_end_state(session: ParsedSession) -> tuple[str, str]:
@@ -51,9 +42,9 @@ def derive_end_state(session: ParsedSession) -> tuple[str, str]:
     if trailing_errors(session.tools) >= THRESHOLDS["error_cascade"]:
         return ("error-cascade", "session ends on consecutive failing tool calls")
     if session.messages and session.messages[-1].role == "assistant":
-        api_error = _final_api_error(session)
-        if api_error is not None:
-            return ("error-cascade", api_error.detail or "final model turn ended in an API error")
+        last = session.messages[-1]
+        if last.stop_reason == "error":
+            return ("error-cascade", last.error_text or "final model turn ended in an API error")
         if any(e.subtype == "compaction" for e in session.sysev[-5:]):
             return ("compacted-idle", "went idle shortly after a context compaction")
         return ("complete", "")

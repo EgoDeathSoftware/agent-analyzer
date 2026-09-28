@@ -17,9 +17,11 @@ leaf backward — see the spec Sec 3.4 for why, and what a leaf-only mode would 
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
+from sessionkit import features
 from sessionkit.parse import FileOp, Message, ParsedSession, SysEvent, ToolCall, digest
 from sessionkit.redact import preview
 
@@ -31,6 +33,12 @@ OUTPUT_PREVIEW = 2000
 #: Claude Code's capitalised `Read`/`Edit`/`MultiEdit`/`NotebookEdit` with `file_path`.
 FILE_TOOLS = {"read": "read", "write": "write", "edit": "edit"}
 PATH_KEY = "path"
+
+ERROR_PREVIEW = 300
+FINAL_TEXT_CHARS = 4000
+#: pi ``stopReason`` → the harness-neutral vocabulary; ``pending``/``deferred`` map to "".
+_PI_STOP_REASONS = {"stop": "end", "toolUse": "tool_use", "length": "length",
+                    "error": "error", "aborted": "aborted"}
 
 
 def _text_of(content: Any) -> str:
@@ -79,7 +87,7 @@ class _Parser:
     def __init__(self, path: Path, source_id: str, sid: str,
                 session: ParsedSession | None = None) -> None:
         self.out = session if session is not None else ParsedSession(
-            sid=sid, source_id=source_id, path=str(path))
+            sid=sid, source_id=source_id, path=str(path), harness="pi")
         self.pending: dict[str, ToolCall] = {}
 
     def _touch_ts(self, ts: str) -> None:
@@ -98,13 +106,15 @@ class _Parser:
             self._header(rec)
         elif etype == "message":
             self._message(line_no, rec)
-        elif etype in ("model_change", "thinking_level_change", "label", "session_info"):
+        elif etype in ("model_change", "thinking_level_change", "label", "session_info",
+                       "context_edit"):
             ts = str(rec.get("timestamp") or "")
             self._touch_ts(ts)
             self.out.sysev.append(SysEvent(line_no, ts, etype))
         elif etype == "compaction":
             ts = str(rec.get("timestamp") or "")
             self._touch_ts(ts)
+            self._compaction_usage(rec.get("usage"))
             self.out.sysev.append(
                 SysEvent(line_no, ts, "compaction", str(rec.get("tokensBefore") or "")))
         elif etype == "branch_summary":
@@ -123,6 +133,16 @@ class _Parser:
         out = self.out
         out.cwd = str(rec.get("cwd") or out.cwd)
         self._touch_ts(str(rec.get("timestamp") or ""))
+
+    def _compaction_usage(self, usage: Any) -> None:
+        """Count the model call that wrote a compaction summary — it is billed like any turn."""
+        if not isinstance(usage, dict):
+            return
+        self.out.tok_in += int(usage.get("input") or 0)
+        self.out.tok_out += int(usage.get("output") or 0)
+        cost = usage.get("cost")
+        total = cost.get("total") if isinstance(cost, dict) else cost
+        self.out.cost_usd += float(total or 0.0)
 
     def _message(self, line_no: int, rec: dict[str, Any]) -> None:
         msg = rec.get("message")
@@ -146,12 +166,14 @@ class _Parser:
     def _user(self, line_no: int, ts: str, msg: dict[str, Any]) -> None:
         text = _text_of(msg.get("content"))
         out = self.out
-        if text.strip():
+        prompt = bool(text.strip())
+        if prompt:
             out.turns += 1
             if not out.first_prompt:
                 out.first_prompt = preview(text, MSG_PREVIEW)
         out.messages.append(Message(uuid=f"u-{line_no}", line=line_no, ts=ts, role="user",
-                                    text_len=len(text), preview=preview(text, MSG_PREVIEW)))
+                                    text_len=len(text), preview=preview(text, MSG_PREVIEW),
+                                    refs=features.extract_refs(text) if prompt else []))
 
     def _assistant(self, line_no: int, ts: str, msg: dict[str, Any]) -> None:
         out = self.out
@@ -171,14 +193,19 @@ class _Parser:
             out.model = model
 
         content = msg.get("content")
-        text = _text_of(content)
-        out.messages.append(Message(uuid=f"a-{line_no}", line=line_no, ts=ts, role="assistant",
-                                    model=model, tok_in=tok_in, tok_out=tok_out, tok_cr=tok_cr,
-                                    tok_cc=tok_cc, text_len=len(text),
-                                    preview=preview(text, MSG_PREVIEW)))
-        if msg.get("stopReason") == "error":
-            out.sysev.append(SysEvent(line_no, ts, "api_error",
-                                      preview(str(msg.get("errorMessage") or ""), 120)))
+        visible, reasoning, calls = features.split_content(content, "toolCall")
+        stop = _PI_STOP_REASONS.get(str(msg.get("stopReason") or ""), "")
+        error_text = (preview(str(msg.get("errorMessage") or ""), ERROR_PREVIEW)
+                      if stop == "error" else "")
+        full = f"{visible}\n{reasoning}"
+        out.messages.append(Message(
+            uuid=f"a-{line_no}", line=line_no, ts=ts, role="assistant", model=model,
+            tok_in=tok_in, tok_out=tok_out, tok_cr=tok_cr, tok_cc=tok_cc,
+            text_len=len(visible), preview=preview(visible, MSG_PREVIEW), stop_reason=stop,
+            tool_calls=calls, reasoning_len=len(reasoning), error_text=error_text,
+            markup_leak=features.markup_leak(full), repeat_ratio=features.repeat_ratio(full),
+            claims_done=features.claims_done(visible)))
+        out.final_text = visible[-FINAL_TEXT_CHARS:]
         if isinstance(content, list):
             for block in content:
                 if isinstance(block, dict) and block.get("type") == "toolCall":
@@ -259,7 +286,7 @@ def _subagent_children(parent_sid: str, source_id: str, path: str, parent_cwd: s
             continue
         child_sid = f"{parent_sid}:{call.tool_use_id}:{i}"
         child = ParsedSession(sid=child_sid, source_id=source_id, path=path, cwd=parent_cwd,
-                              is_subagent=True, parent_sid=parent_sid,
+                              harness="pi", is_subagent=True, parent_sid=parent_sid,
                               agent_type=str(result.get("agent") or ""))
         sub = _Parser(Path(path), source_id, child_sid, session=child)
         for msg in result.get("messages") or []:
@@ -312,6 +339,7 @@ def parse_file(path: Path, source_id: str) -> ParsedSession:
         an ``id``.
     """
     parser = _Parser(path, source_id, path.stem)
+    last_malformed = False
     try:
         handle = path.open("r", encoding="utf-8", errors="replace")
     except OSError:
@@ -325,11 +353,16 @@ def parse_file(path: Path, source_id: str) -> ParsedSession:
                 rec = json.loads(line)
             except json.JSONDecodeError:
                 parser.out.malformed_lines += 1
+                last_malformed = True
                 continue
             if not isinstance(rec, dict):
                 parser.out.malformed_lines += 1
+                last_malformed = True
                 continue
+            last_malformed = False
             if line_no == 1 and rec.get("type") == "session" and rec.get("id"):
                 parser.out.sid = str(rec["id"])
             parser.feed(line_no, rec)
-    return parser.finish()
+    out = parser.finish()
+    out.last_line_malformed = last_malformed
+    return out

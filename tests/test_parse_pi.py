@@ -156,17 +156,6 @@ class ParsePiTest(unittest.TestCase):
         session = parse_file(path, "pi")
         self.assertEqual(session.malformed_lines, 1)
 
-    def test_assistant_error_stop_recorded_as_sysevent(self) -> None:
-        session = self.parse(fx.api_error_session())
-        errors = [e for e in session.sysev if e.subtype == "api_error"]
-        self.assertEqual(len(errors), 1)
-        self.assertEqual(errors[0].line, 3)
-        self.assertIn("Refresh token expired", errors[0].detail)
-
-    def test_normal_assistant_stop_records_no_api_error(self) -> None:
-        session = self.parse(fx.simple_session())
-        self.assertFalse([e for e in session.sysev if e.subtype == "api_error"])
-
 
 class ParsePiSubagentTest(unittest.TestCase):
     """Nested subagent tool-result expansion into synthetic child sessions — spec Sec 4."""
@@ -245,3 +234,72 @@ class ParsePiSubagentTest(unittest.TestCase):
                                details={"mode": "single", "results": []}),
         ])
         self.assertEqual(session.child_sessions, [])
+
+
+class ParsePiFeaturesTest(unittest.TestCase):
+    """pi messages carry the same parse-time features as Claude Code's."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+
+    def parse(self, entries: list[dict]) -> "object":
+        return parse_file(fx.write(self.tmp, entries), "pi")
+
+    def _turn(self, content: list[dict], **kw) -> list[dict]:
+        return [fx.header(), fx.user_msg("e1", None, "go"),
+                fx.assistant_msg("e2", "e1", content, **kw)]
+
+    def test_error_stop_is_recorded_on_the_message(self) -> None:
+        session = self.parse(fx.api_error_session())
+        last = session.messages[-1]
+        self.assertEqual(last.stop_reason, "error")
+        self.assertIn("Refresh token expired", last.error_text)
+        self.assertFalse([e for e in session.sysev if e.subtype == "api_error"])
+
+    def test_normal_stop_has_no_error_text(self) -> None:
+        last = self.parse(fx.simple_session()).messages[-1]
+        self.assertEqual(last.stop_reason, "end")
+        self.assertEqual(last.error_text, "")
+
+    def test_thinking_is_reasoning_not_visible_text(self) -> None:
+        session = self.parse(self._turn([fx.thinking_block("private plan"),
+                                         {"type": "text", "text": "Done."}]))
+        last = session.messages[-1]
+        self.assertEqual(last.preview, "Done.")
+        self.assertEqual(last.reasoning_len, len("private plan"))
+        self.assertTrue(last.claims_done)
+        self.assertEqual(session.final_text, "Done.")
+
+    def test_stop_reason_mapping(self) -> None:
+        for raw, expected in (("length", "length"), ("aborted", "aborted"),
+                              ("toolUse", "tool_use"), ("pending", "")):
+            with self.subTest(raw):
+                last = self.parse(self._turn([], stop_reason=raw)).messages[-1]
+                self.assertEqual(last.stop_reason, expected)
+                self.assertEqual(last.error_text, "")
+
+    def test_context_edit_is_a_sysevent_not_malformed(self) -> None:
+        session = self.parse([fx.header(), fx.user_msg("e1", None, "go"),
+                              fx.context_edit("e2", "e1", "e1")])
+        self.assertEqual(session.malformed_lines, 0)
+        self.assertIn("context_edit", [e.subtype for e in session.sysev])
+
+    def test_compaction_usage_is_counted(self) -> None:
+        usage = {"input": 1000, "output": 200, "cost": {"total": 0.05}}
+        session = self.parse([fx.header(), fx.user_msg("e1", None, "go"),
+                              fx.compaction("e2", "e1", "summary", 90_000, usage=usage)])
+        self.assertAlmostEqual(session.cost_usd, 0.05)
+        self.assertEqual(session.tok_in, 1000)
+
+    def test_harness_and_refs(self) -> None:
+        session = self.parse([fx.header(), fx.user_msg("e1", None, "update @config/models.json")])
+        self.assertEqual(session.harness, "pi")
+        self.assertEqual(session.messages[0].refs, ["config/models.json"])
+
+    def test_last_line_malformed(self) -> None:
+        path = fx.write(self.tmp, fx.simple_session())
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write('{"type": "mess')
+        self.assertTrue(parse_file(path, "pi").last_line_malformed)

@@ -286,8 +286,11 @@ def timeline_rows(entry: Loaded) -> list[Row]:
     rows: list[Row] = []
     session = entry.session
     for message in session.messages:
+        detail = message.preview
+        if not detail and message.error_text:
+            detail = f"[{message.stop_reason}] {message.error_text}"
         rows.append({"line": message.line, "kind": "msg", "name": message.role,
-                     "detail": message.preview})
+                     "detail": detail})
     for tool in session.tools:
         detail = f"[{tool.err_class}] {tool.err_detail}" if tool.is_error else tool.input_preview
         rows.append({"line": tool.line, "kind": "tool", "name": tool.name, "detail": detail})

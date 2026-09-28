@@ -140,6 +140,13 @@ class EndStateTest(unittest.TestCase):
     def test_unknown_when_empty(self) -> None:
         self.assertEqual(derive_end_state(_session())[0], "unknown")
 
+    def test_final_error_turn_is_error_cascade_with_its_text(self) -> None:
+        from sessionkit.parse import Message
+        session = _session()
+        session.messages.append(Message(uuid="u", line=3, ts="", role="assistant",
+                                        stop_reason="error", error_text="rate_limit: slow down"))
+        self.assertEqual(derive_end_state(session), ("error-cascade", "rate_limit: slow down"))
+
 
 class DetectorTest(unittest.TestCase):
     """Each detector fires on its pattern and stays silent otherwise."""

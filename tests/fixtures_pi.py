@@ -86,10 +86,23 @@ def bash_msg(entry_id: str, parent_id: str | None, command: str, output: str,
     })
 
 
+def thinking_block(text: str) -> dict[str, Any]:
+    return {"type": "thinking", "thinking": text}
+
+
+def context_edit(entry_id: str, parent_id: str | None, target_id: str,
+                 ts: str = "2026-09-01T00:00:04.000Z") -> dict[str, Any]:
+    """A ``context_edit`` entry — seen in real pi 0.84 sessions, absent from its docs."""
+    return _entry("context_edit", entry_id, parent_id, ts, targetId=target_id,
+                  replacement=None)
+
+
 def compaction(entry_id: str, parent_id: str | None, summary: str, tokens_before: int,
-              ts: str = "2026-09-01T00:00:04.000Z") -> dict[str, Any]:
+               ts: str = "2026-09-01T00:00:04.000Z",
+               usage: dict[str, Any] | None = None) -> dict[str, Any]:
+    extra: dict[str, Any] = {"usage": usage} if usage is not None else {}
     return _entry("compaction", entry_id, parent_id, ts, summary=summary,
-                 tokensBefore=tokens_before)
+                  tokensBefore=tokens_before, **extra)
 
 
 def write(tmp: Path, entries: list[dict[str, Any]],
