@@ -20,7 +20,7 @@ tests and commands.
 | CP | File | Tasks | Delivers | Status |
 |---|---|---|---|---|
 | 1 | [`2026-09-27-agent-postmortem-01-foundation.md`](2026-09-27-agent-postmortem-01-foundation.md) | 1, 2 | `taxonomy.py`, `harness.py` and the `detectors/` package replace the monolithic `classify.py`, with no behavior change. | done |
-| 2 | [`2026-09-27-agent-postmortem-02-parsers.md`](2026-09-27-agent-postmortem-02-parsers.md) | 3, 4, 5, 6 | Parse-time features and new `Message`/`ParsedSession` fields in both parsers; the pi and Claude Code parser bugs are fixed; pi-subagents async runs are loaded and linked. | todo |
+| 2 | [`2026-09-27-agent-postmortem-02-parsers.md`](2026-09-27-agent-postmortem-02-parsers.md) | 3, 4, 5, 6 | Parse-time features and new `Message`/`ParsedSession` fields in both parsers; the pi and Claude Code parser bugs are fixed; pi-subagents async runs are loaded and linked. | done |
 | 3 | [`2026-09-27-agent-postmortem-03-detectors-core.md`](2026-09-27-agent-postmortem-03-detectors-core.md) | 7, 8, 9, 10 | The new and widened error classes; the tool-protocol, generation, loop and lifecycle detectors; the new end states; liveness passed into the detectors. | todo |
 | 4 | [`2026-09-27-agent-postmortem-04-detectors-judgment.md`](2026-09-27-agent-postmortem-04-detectors-judgment.md) | 11, 12, 13 | The recovery and alignment candidates, the focus profile, drift candidates, resource interference, and the registry completeness tests. | todo |
 | 5 | [`2026-09-27-agent-postmortem-05-cli.md`](2026-09-27-agent-postmortem-05-cli.md) | 14, 15 | `sk forensics` as the post-mortem report; `sk findings` with rates; `errors --group-by model\|harness`; `index --finding`. | todo |
@@ -30,10 +30,10 @@ tests and commands.
 
 - [x] **T1** (CP1) `taxonomy.py`, the single failure table (refactor, no behavior change) — commit: `68ffd17`
 - [x] **T2** (CP1) `harness.py` tool roles and the `detectors/` package (refactor, no behavior change) — commit: `ed94928`
-- [ ] **T3** (CP2) `features.py`, the parse-time text features — commit: `—`
-- [ ] **T4** (CP2) Data-model fields, populated by the Claude Code parser — commit: `—`
-- [ ] **T5** (CP2) The pi parser populates the same fields, and end state reads `stop_reason` — commit: `—`
-- [ ] **T6** (CP2) Load pi-subagents async child runs and link them to their parent — commit: `—`
+- [x] **T3** (CP2) `features.py`, the parse-time text features — commit: `4e5208e`
+- [x] **T4** (CP2) Data-model fields, populated by the Claude Code parser — commit: `9dc6531`
+- [x] **T5** (CP2) The pi parser populates the same fields, and end state reads `stop_reason` — commit: `32b4354`
+- [x] **T6** (CP2) Load pi-subagents async child runs and link them to their parent — commit: `ac5c5c5`
 - [ ] **T7** (CP3) New and widened error classes, and API-error classification — commit: `—`
 - [ ] **T8** (CP3) Tool-protocol and generation detectors — commit: `—`
 - [ ] **T9** (CP3) Loop detectors (new and retuned) — commit: `—`
@@ -62,6 +62,18 @@ tests and commands.
   starting with `set -e` (or another shell builtin not in the `cd`-style skip-list) followed
   by the real command on the next line still returns `"set"` as the program, not the real
   one. Revisit if CP4's focus-profile grouping shows this matters on real corpus data.
+- 2026-09-28 — CP2 done (commits 4e5208e, 9dc6531, 32b4354, ac5c5c5, plus fix-wave commit
+  e7ce888). Fix wave addressed one Important regression a final review found: normalizing
+  Claude Code's `compact_boundary` and pi's native `compaction` sysevent subtype into one
+  name (needed so `derive_end_state`'s existing `compacted-idle` check kept working for
+  Claude Code) incidentally made that check reachable for pi too — and pi's sparse sysevent
+  stream meant one early compaction in an 80-turn healthy session still misclassified as
+  `compacted-idle`. Fixed by keying the check on message position (compaction after the last
+  user message) instead of "last 5 sysevents"; the identical heuristic was also corrected in
+  the not-yet-implemented CP3 plan doc so CP3 doesn't reintroduce it. 365/365 tests passing.
+- 2026-09-28 — For CP3: pi's `aborted`/`length` stop reasons still fall through to `complete`
+  in `derive_end_state` — CP3 is expected to add dedicated end states for these (per the
+  spec's stop-reason vocabulary already carrying `aborted`).
 
 ---
 
