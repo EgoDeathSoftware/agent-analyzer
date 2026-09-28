@@ -97,6 +97,7 @@ class ApiErrorTest(unittest.TestCase):
         ('400: {"message":"This model\'s maximum context length is 131072 tokens."}',
          "context-overflow"),
         ("Request timed out.", "network"),
+        ("Provider finish_reason: content_filter", "api-error"),
         ("", ""),
     ]
 
