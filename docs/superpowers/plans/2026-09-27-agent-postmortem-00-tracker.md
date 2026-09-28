@@ -22,7 +22,7 @@ tests and commands.
 | 1 | [`2026-09-27-agent-postmortem-01-foundation.md`](2026-09-27-agent-postmortem-01-foundation.md) | 1, 2 | `taxonomy.py`, `harness.py` and the `detectors/` package replace the monolithic `classify.py`, with no behavior change. | done |
 | 2 | [`2026-09-27-agent-postmortem-02-parsers.md`](2026-09-27-agent-postmortem-02-parsers.md) | 3, 4, 5, 6 | Parse-time features and new `Message`/`ParsedSession` fields in both parsers; the pi and Claude Code parser bugs are fixed; pi-subagents async runs are loaded and linked. | done |
 | 3 | [`2026-09-27-agent-postmortem-03-detectors-core.md`](2026-09-27-agent-postmortem-03-detectors-core.md) | 7, 8, 9, 10 | The new and widened error classes; the tool-protocol, generation, loop and lifecycle detectors; the new end states; liveness passed into the detectors. | done |
-| 4 | [`2026-09-27-agent-postmortem-04-detectors-judgment.md`](2026-09-27-agent-postmortem-04-detectors-judgment.md) | 11, 12, 13 | The recovery and alignment candidates, the focus profile, drift candidates, resource interference, and the registry completeness tests. | todo |
+| 4 | [`2026-09-27-agent-postmortem-04-detectors-judgment.md`](2026-09-27-agent-postmortem-04-detectors-judgment.md) | 11, 12, 13 | The recovery and alignment candidates, the focus profile, drift candidates, resource interference, and the registry completeness tests. | done |
 | 5 | [`2026-09-27-agent-postmortem-05-cli.md`](2026-09-27-agent-postmortem-05-cli.md) | 14, 15 | `sk forensics` as the post-mortem report; `sk findings` with rates; `errors --group-by model\|harness`; `index --finding`. | todo |
 | 6 | [`2026-09-27-agent-postmortem-06-skills-validation.md`](2026-09-27-agent-postmortem-06-skills-validation.md) | 16, 17, 18 | The failure-class knowledge base, the post-mortem and fleet skills, the README, corpus acceptance, the dry-run regression and real pi sessions. | todo |
 
@@ -38,9 +38,9 @@ tests and commands.
 - [x] **T8** (CP3) Tool-protocol and generation detectors — commit: `0d71491`
 - [x] **T9** (CP3) Loop detectors (new and retuned) — commit: `5435d42`
 - [x] **T10** (CP3) Lifecycle detectors, end states, and liveness plumbing — commit: `68a85e5`
-- [ ] **T11** (CP4) Recovery and alignment candidates — commit: `—`
-- [ ] **T12** (CP4) Focus profile and drift candidates — commit: `—`
-- [ ] **T13** (CP4) Cross-session resource interference, and registry completeness — commit: `—`
+- [x] **T11** (CP4) Recovery and alignment candidates — commit: `2e0556e`
+- [x] **T12** (CP4) Focus profile and drift candidates — commit: `d92f246`
+- [x] **T13** (CP4) Cross-session resource interference, and registry completeness — commit: `0d7d5bb`
 - [ ] **T14** (CP5) `sk forensics` becomes the post-mortem report — commit: `—`
 - [ ] **T15** (CP5) `sk findings` fleet view, `errors --group-by model|harness`, and `index --finding` — commit: `—`
 - [ ] **T16** (CP6) The failure-class knowledge base and parity tests — commit: `—`
@@ -158,3 +158,31 @@ tests and commands.
   `skills/unfinished-work/SKILL.md` doesn't know the `aborted`, `output-truncated` and
   `agent-unresponsive` end states; unify the `_EXIT_CODES` killed/timeout hint text with the
   taxonomy entries (deferred from CP3).
+- 2026-09-28 — CP4 done (commits 2e0556e, 6f7afa8, d92f246, 0d7d5bb, plus final-review fix wave
+  7521d22, 11e3212). Suite: 470/470. Rulings that amend the plan:
+  `alignment.user_turns` and interrupt drift select asks by `is_prompt` (not `text_len > 0`);
+  `error_ignored` groups Claude Code records by `msg_id` and cites the claiming record;
+  `classify._NEXT_STEP_RE` no longer treats "let me know" as a next step — this also changes
+  `derive_tail_signal`, which `skills/unfinished-work` reads; `alignment._IMPLEMENT` matches
+  inflected verbs; Claude Code teammate relays (`<teammate-message`, "Another Claude session sent
+  a message:") are no longer prompts, so they no longer split turns or count as
+  `user-interrupt` redirects, and relay-only teammate sessions have no user turns; `give_up`
+  requires end state `complete` (it blamed the model for API-error endings);
+  `unverified_completion` ignores doc-only changes (`.md`/`.rst`/`.txt`); drift findings cite
+  distinct lines (pi puts parallel calls on one line). Real-corpus rates after tuning:
+  give-up 11, unverified-completion 22, premature-stop 7, scope-creep 8, drift-candidate ~112 (106 are the user-interrupt form),
+  resource-interference 1, of ~1,245 sessions.
+- 2026-09-28 — For CP5: `corpus.load_session()` (the `sk show <sid>` path) never runs the
+  cross-session pass, so `resource-interference` appears in `sk forensics` but not `sk show`.
+  `Run.referenced` defaults to `True` when the turn's ask has no refs; `focus_profile_rows`
+  should print `-` for `referenced` when `turn.refs` is empty, not `yes`.
+- 2026-09-28 — For CP6 tuning (T18): `scope_creep` reads only the 200-char ask preview;
+  `_IMPLEMENT` misses verbs such as sort/organize; `premature_stop` flags "let me X" that the
+  same message fulfils; refs are turn-scoped (a later turn loses earlier turns' refs);
+  `_program_named` misses wrapper-heavy exec runs (ssh); `_names`'s bare-token arm is a raw
+  substring match; run fragmentation (a detour split into many 1–3-call runs never reaches
+  `drift_min_calls`); `give_up`'s `trailing_errors == 1` means 2 trailing errors is neither a
+  give-up nor a cascade; the registry test checks for an `Anomaly("kind"` literal, not that the
+  detector is in `DETECTORS`; 42 Claude Code sessions end on injected user records (`/exit`
+  stdout) and read as `interrupted-user` because `_user_end` keys on role, not `is_prompt`,
+  hiding them from the tail detectors.
