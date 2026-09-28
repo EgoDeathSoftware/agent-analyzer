@@ -22,6 +22,7 @@ from typing import Any, Callable, Iterable
 from sessionkit import pricing, settingsjson as sj
 from sessionkit.taxonomy import lookup, signature
 from sessionkit.corpus import Corpus, Loaded
+from sessionkit.harness import role
 from sessionkit.parse import ToolCall, block_text, read_line
 from sessionkit.redact import redact
 
@@ -767,7 +768,7 @@ def children_rows(entry: Loaded, corpus: Corpus) -> list[Row]:
     by_sid = {c.session.sid: c for c in corpus.sessions if c.session.is_subagent}
     out: list[Row] = []
     for tool in entry.session.tools:
-        if tool.name not in ("Agent", "subagent"):
+        if role(entry.session.harness, tool.name) != "dispatch":
             continue
         task_id = edges.get(tool.tool_use_id, "")
         child = by_sid.get(task_id) if task_id else None

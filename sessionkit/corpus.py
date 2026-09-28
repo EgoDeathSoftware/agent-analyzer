@@ -22,7 +22,8 @@ from pathlib import Path
 
 from sessionkit import parse_pi
 from sessionkit import sources as src
-from sessionkit.classify import Anomaly, annotate_errors, derive_end_state, detect
+from sessionkit.classify import annotate_errors, derive_end_state
+from sessionkit.detectors import Anomaly, detect
 from sessionkit.parse import ParsedSession, parse_file, project_key
 
 

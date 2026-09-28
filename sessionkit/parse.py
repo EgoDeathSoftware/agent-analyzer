@@ -124,6 +124,7 @@ class ParsedSession:
     sid: str
     source_id: str
     path: str
+    harness: str = ""
     cwd: str = ""
     git_branch: str = ""
     version: str = ""

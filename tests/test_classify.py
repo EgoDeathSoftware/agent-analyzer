@@ -8,7 +8,8 @@ from __future__ import annotations
 
 import unittest
 
-from sessionkit.classify import annotate_errors, derive_end_state, detect
+from sessionkit.classify import annotate_errors, derive_end_state
+from sessionkit.detectors import detect
 from sessionkit.parse import FileOp, ParsedSession, SysEvent, ToolCall
 from sessionkit.taxonomy import classify_error, signature
 
