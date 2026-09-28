@@ -48,7 +48,7 @@ class TaxonomyTest(unittest.TestCase):
         ("Exit code 137", "killed"),
         ("<tool_use_error>InputValidationError: Read failed due to the following issue: "
          "The parameter `offset` type is expected as `number` but provided as `string`",
-         "input-validation"),
+         "invalid-args"),
         ("Permission for this action was denied by the Claude Code auto mode classifier. "
          "Reason: [Merge Without Review]", "policy-denied"),
         ("Permission to use Bash with command sudo cp /a /b has been denied.",

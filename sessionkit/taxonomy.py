@@ -62,24 +62,65 @@ def _kind(name: str, family: str, tier: str, fix_target: str, hint: str) -> Fail
 
 
 #: Ordered: the first class whose pattern matches wins, so specific classes precede generic
-#: ones (a denied mkdir arrives as "Exit code 1 ... Permission denied").
+#: ones (a denied mkdir arrives as "Exit code 1 ... Permission denied"; a pi bash failure ends
+#: with "Command exited with code N" after its real cause).
 ERROR_CLASSES: tuple[FailureClass, ...] = (
     _error("hook-block", "environment", "harness",
-           "Promote the rule into CLAUDE.md so the command is never emitted.",
+           "Promote the rule into CLAUDE.md (AGENTS.md for pi) so the command is never "
+           "emitted.",
            r"PreToolUse:|PostToolUse:.*hook error|\bBLOCKED:"),
     _error("user-rejected", "environment", "none",
            "Approach problem — the model proposed something the user declined.",
-           r"user doesn't want to proceed|tool use was rejected"),
+           r"user doesn't want to (?:proceed|take this action)|tool use was rejected"),
     # Distinct from user-rejected: no human saw this one, the harness blocked it.
     _error("policy-denied", "environment", "harness",
            "Blocked by permission policy — needs approval or a different approach.",
            r"denied by the Claude Code|auto mode classifier|"
            r"permission for this action was denied|"
-           r"permission to use \w+.{0,200}?has been denied", flags=re.I | re.S),
-    # A malformed call is the model's own bug, not the environment's.
-    _error("input-validation", "tool-protocol", "model",
-           "Malformed tool call — the model passed a wrong argument type.",
-           r"InputValidationError|parameter `\w+` type is expected"),
+           r"permission to use \w+.{0,200}?has been denied|"
+           r"File is in a directory that is denied by your permission|"
+           r"Tool execution was blocked",
+           flags=re.I | re.S),
+    _error("tool-error-structured", "environment", "env",
+           'A tool returned a structured failure ({"ok": false}) — read its errors list; the '
+           "input usually broke the tool's own rules.",
+           r'^\s*\{\s*"ok"\s*:\s*false'),
+    # Before invalid-args: pi silently repairs unparseable tool-call JSON to {}, so a
+    # validation error on empty arguments means the serving stack lost them.
+    _error("args-dropped", "tool-protocol", "serving",
+           "The tool call reached the harness with empty arguments — the serving stack's "
+           "tool-call parser lost them. Check the vLLM tool parser and chat template.",
+           r"Received arguments:\s*\{\s*\}"),
+    _error("invalid-args", "tool-protocol", "model",
+           "Malformed tool call — the model passed arguments that fail the tool's schema.",
+           r"InputValidationError|parameter `\w+` type is expected|"
+           r'Validation failed for tool "|Invalid arguments|is required when'),
+    _error("unknown-tool", "tool-protocol", "model",
+           "The model called a tool that does not exist — often a sibling tool's name or one "
+           "from another harness. Check the tool list it was given.",
+           r"\bTool [\w.-]+ not found|No such tool available|Unknown skill:"),
+    _error("truncated-call", "tool-protocol", "harness",
+           "A tool call was cut off by the output token limit and never ran. Raise the model's "
+           "maxTokens, or have it write in smaller pieces.",
+           r"was not executed: the response hit the output token limit"),
+    _error("edit-mismatch", "tool-protocol", "model",
+           "The edit's old text did not match the file (whitespace, a stale view, or not "
+           "unique). Re-read the exact region before editing.",
+           r"String to replace not found|Found \d+ matches of the string|"
+           r"Could not find the exact text in|Could not find edits\[|"
+           r"Found \d+ occurrences of the text|No changes made to|"
+           r"edits\[\d+\] and edits\[\d+\] overlap"),
+    _error("tool-misuse", "tool-protocol", "model",
+           "A tool was used on the wrong kind of target (a directory for a file read, an "
+           "offset past the end). Check the path or range first.",
+           r"\bEISDIR\b|Offset \d+ is beyond end of file"),
+    _error("sibling-cascade", "tool-protocol", "none",
+           "A parallel call failed only because a sibling in the same batch failed — look at "
+           "the sibling's error instead.",
+           r"Sibling tool call errored"),
+    _error("aborted", "lifecycle", "none",
+           "The user stopped this call or turn.",
+           r"\[Request interrupted by user|Operation aborted|Command aborted"),
     _error("file-too-large", "tool-protocol", "model",
            "Read with offset/limit, or use Grep instead of a full read.",
            r"exceeds maximum allowed tokens"),
@@ -114,13 +155,13 @@ ERROR_CLASSES: tuple[FailureClass, ...] = (
            r"request failed with status code|\b5\d\d\b error"),
     _error("mcp-error", "environment", "env",
            "MCP server health — check the server, not the prompt.",
-           r"error in mcp__|mcp server .* (failed|error)"),
+           r"error in mcp__|mcp server .* (failed|error)|No active transport"),
     _error("timeout", "generic", "none",
            "Raise the timeout or split the work.",
            r"timed out|timeout exceeded"),
     _error("exit-code", "generic", "none",
            "Genuine command failure — read the command output.",
-           r"^exit code \d+"),
+           r"^exit code \d+", r"Command exited with code \d+\s*$"),
 )
 
 #: Exit codes whose meaning is unambiguous. Checked *before* the body-text rules because the
@@ -133,10 +174,43 @@ _EXIT_CODES: dict[int, tuple[str, str]] = {
     143: ("killed", "Terminated (SIGTERM) — the work did not complete."),
 }
 _EXIT_RE = re.compile(r"^exit code (\d+)\b", re.I)
+#: pi appends the status to the *end* of bash output: "...\n\nCommand exited with code N".
+_PI_EXIT_RE = re.compile(r"Command exited with code (\d+)\s*$", re.I)
 
 #: Reached only through ``_EXIT_CODES``, so it has no text patterns of its own.
 KILLED = _kind("killed", "generic", TIER_S, "env",
                "Killed (SIGKILL, usually OOM) or terminated — the work did not complete.")
+
+_OVERFLOW = _error(
+    "context-overflow", "environment", "harness",
+    "The prompt plus the reserved output tokens exceeded the context window. Lower the "
+    "model's maxTokens reservation (32K reserved on a 131K window leaves 98K for the "
+    "conversation) or compact earlier; splitting the work is the fallback.",
+    r"maximum context length|context length exceeded|context window|prompt is too long|"
+    r"Context overflow recovery failed")
+_AUTH = _error(
+    "auth", "environment", "env",
+    "The provider sign-in is missing or expired — re-authenticate. Not a model or prompt "
+    "problem.",
+    r"authentication_failed|invalid_grant|oauth|\b401\b|\b403\b|please run /login|"
+    r"not logged in|login expired|unauthori[sz]ed")
+_NETWORK = _error(
+    "network", "environment", "env",
+    "The model endpoint was unreachable or too slow to answer — check the server's health "
+    "and load, and whether something else was using it at the time.",
+    r"ECONNREFUSED|ECONNRESET|ENOTFOUND|getaddrinfo|fetch failed|socket hang up|timed out|"
+    r"timeout|network error")
+API_ERROR_CLASSES: tuple[FailureClass, ...] = (_OVERFLOW, _AUTH, _NETWORK)
+
+#: Ordered API-error rules. ``rate-limit`` reuses the tool-result class name with patterns
+#: that match provider wording ("rate_limit", "hit your session limit").
+_API_RULES: tuple[tuple[str, tuple[re.Pattern[str], ...]], ...] = (
+    (_OVERFLOW.name, _OVERFLOW.patterns),
+    (_AUTH.name, _AUTH.patterns),
+    ("rate-limit", (re.compile(
+        r"rate.?limit|hit your (?:session )?limit|\b429\b|too many requests|quota", re.I),)),
+    (_NETWORK.name, _NETWORK.patterns),
+)
 
 FINDING_KINDS: tuple[FailureClass, ...] = (
     _kind("repeat-tool", "loop", TIER_S, "model",
@@ -170,7 +244,8 @@ FINDING_KINDS: tuple[FailureClass, ...] = (
           "and ask before retrying, rather than trying again unprompted."),
 )
 
-ALL_CLASSES: tuple[FailureClass, ...] = (*ERROR_CLASSES, KILLED, *FINDING_KINDS)
+ALL_CLASSES: tuple[FailureClass, ...] = (*ERROR_CLASSES, KILLED, *API_ERROR_CLASSES,
+                                         *FINDING_KINDS)
 _REGISTRY: dict[str, FailureClass] = {c.name: c for c in ALL_CLASSES}
 
 _NORMALISE = [
@@ -198,15 +273,35 @@ def classify_error(text: str) -> tuple[str, str]:
     body = (text or "").strip()
     if not body:
         return ("empty", "")
-    match = _EXIT_RE.match(body)
-    if match:
-        known = _EXIT_CODES.get(int(match.group(1)))
-        if known:
-            return known
+    code = _exit_code(body)
+    if code is not None and code in _EXIT_CODES:
+        return _EXIT_CODES[code]
     for entry in ERROR_CLASSES:
         if any(p.search(body) for p in entry.patterns):
             return (entry.name, entry.hint)
     return ("other", "")
+
+
+def _exit_code(body: str) -> int | None:
+    """The exit code in Claude Code's ``Exit code N`` prefix or pi's trailing suffix."""
+    match = _EXIT_RE.match(body) or _PI_EXIT_RE.search(body)
+    return int(match.group(1)) if match else None
+
+
+def classify_api_error(text: str) -> str:
+    """Classify a failed model call's error text (``Message.error_text``).
+
+    Returns:
+        ``context-overflow``, ``auth``, ``rate-limit``, ``network``, the catch-all
+        ``api-error``, or ``""`` for empty text.
+    """
+    body = (text or "").strip()
+    if not body:
+        return ""
+    for name, patterns in _API_RULES:
+        if any(p.search(body) for p in patterns):
+            return name
+    return "api-error"
 
 
 def signature(text: str, limit: int = 80) -> str:
