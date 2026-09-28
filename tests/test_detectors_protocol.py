@@ -118,6 +118,12 @@ class GenerationStallTest(unittest.TestCase):
         stalls = [a for a in detect(s) if a.kind == "generation-stall"]
         self.assertEqual([a.lines for a in stalls], [[line]])
 
+    def test_too_few_turns_for_a_median_say_so(self) -> None:
+        s = df.session(messages=[df.msg(1, "user", text="go", at=df.ts(0)),
+                                 df.msg(2, text="late", at=df.ts(30), stop="end")])
+        stalls = [a for a in detect(s) if a.kind == "generation-stall"]
+        self.assertEqual([a.detail for a in stalls], ["model turn took 30 min (no session median)"])
+
     def test_a_uniformly_slow_model_does_not_fire(self) -> None:
         s, _line = self._slow_session(final_gap=12, step=12)
         self.assertNotIn("generation-stall", _kinds(s))
@@ -127,6 +133,27 @@ class GenerationStallTest(unittest.TestCase):
                                  df.msg(2, at="garbage"), df.msg(3, at="")])
         self.assertEqual(generation.assistant_latencies(s), [])
         self.assertNotIn("generation-stall", _kinds(s))
+
+    def test_claude_code_resume_synthetic_record_is_not_a_generation(self) -> None:
+        """On resume Claude Code writes a "<synthetic>" record long after the last event."""
+        s, line = self._slow_session(final_gap=1)
+        s.harness = "claude-code"
+        s.messages += [
+            df.msg(line + 1, text="No response requested.", at=df.ts(90), stop="end",
+                   model="<synthetic>"),
+            df.msg(line + 2, "user", text="continue", at=df.ts(90.05)),
+            df.msg(line + 3, text="ok", at=df.ts(91), stop="end")]
+        latencies = generation.assistant_latencies(s)
+        self.assertNotIn(line + 1, [m.line for m, _ms in latencies])
+        self.assertNotIn("generation-stall", _kinds(s))
+
+    def test_equal_timestamp_block_records_measure_from_each_other(self) -> None:
+        s = df.session("claude-code", messages=[
+            df.msg(1, "user", text="go", at=df.ts(0)),
+            df.msg(2, reasoning_len=10, at=df.ts(20), stop="end", msg_id="m1"),
+            df.msg(3, text="done", at=df.ts(20), stop="end", msg_id="m1")])
+        latencies = {m.line: ms for m, ms in generation.assistant_latencies(s)}
+        self.assertEqual(latencies, {2: 20 * 60_000, 3: 0})
 
     def test_claude_code_block_records_do_not_fire(self) -> None:
         """Claude Code block records with normal gaps don't spuriously fire."""

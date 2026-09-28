@@ -7,7 +7,7 @@ import statistics
 
 from sessionkit.detectors.base import MAX_LINES, Anomaly, assistant_turns
 from sessionkit.features import parse_ts
-from sessionkit.parse import Message, ParsedSession
+from sessionkit.parse import SYNTHETIC_MODEL, Message, ParsedSession
 from sessionkit.taxonomy import THRESHOLDS
 
 
@@ -48,22 +48,31 @@ def output_truncated(session: ParsedSession) -> list[Anomaly]:
 
 
 def assistant_latencies(session: ParsedSession) -> list[tuple[Message, int]]:
-    """Each assistant message with the milliseconds since the entry before it.
+    """Each assistant message with the milliseconds since the latest other entry at or
+    before it.
 
-    Messages and events with unusable timestamps are skipped rather than guessed at.
+    An earlier record stamped the same instant counts (Claude Code's block records of one
+    message often share a stamp). Claude Code's ``<synthetic>`` records — written on resume
+    or for an API error — are not generations and get no latency. Messages and events with
+    unusable timestamps are skipped rather than guessed at.
     """
-    stamps = [m.ts for m in session.messages]
-    stamps += [c.result_ts for c in session.tools]
-    stamps += [e.ts for e in session.sysev]
-    events = sorted(t for t in (parse_ts(s) for s in stamps) if t is not None)
+    entries = [(m.ts, m.line) for m in session.messages]
+    entries += [(c.result_ts, c.result_line) for c in session.tools]
+    entries += [(e.ts, e.line) for e in session.sysev]
+    events = sorted((at, line) for at, line in ((parse_ts(ts), line) for ts, line in entries)
+                    if at is not None)
     out: list[tuple[Message, int]] = []
     for message in session.messages:
-        at = parse_ts(message.ts) if message.role == "assistant" else None
+        if message.role != "assistant" or message.model == SYNTHETIC_MODEL:
+            continue
+        at = parse_ts(message.ts)
         if at is None:
             continue
-        index = bisect.bisect_left(events, at)
+        # Transcript line breaks timestamp ties, so an earlier record stamped the same instant
+        # counts as "before" and the message's own entry does not.
+        index = bisect.bisect_left(events, (at, message.line))
         if index > 0:
-            out.append((message, int((at - events[index - 1]).total_seconds() * 1000)))
+            out.append((message, int((at - events[index - 1][0]).total_seconds() * 1000)))
     return out
 
 
@@ -72,10 +81,11 @@ def generation_stall(session: ParsedSession) -> list[Anomaly]:
     latencies = assistant_latencies(session)
     if not latencies:
         return []
-    median = statistics.median(ms for _m, ms in latencies) if len(latencies) >= 3 else 0
+    has_median = len(latencies) >= 3
+    median = statistics.median(ms for _m, ms in latencies) if has_median else 0
+    norm = f"session median {int(median) // 1000}s" if has_median else "no session median"
     limit = THRESHOLDS["generation_stall_ms"]
     factor = THRESHOLDS["generation_stall_factor"]
-    return [Anomaly("generation-stall",
-                    f"model turn took {ms // 60_000} min (session median {int(median) // 1000}s)",
+    return [Anomaly("generation-stall", f"model turn took {ms // 60_000} min ({norm})",
                     1, [message.line])
             for message, ms in latencies if ms > limit and ms > factor * median]

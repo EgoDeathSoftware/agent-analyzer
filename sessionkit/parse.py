@@ -48,7 +48,7 @@ FINAL_TEXT_CHARS = 4000
 _CC_STOP_REASONS = {"end_turn": "end", "stop_sequence": "end", "pause_turn": "end",
                     "refusal": "end", "tool_use": "tool_use", "max_tokens": "length"}
 #: The model name Claude Code writes on its own synthetic API-error messages.
-_SYNTHETIC_MODEL = "<synthetic>"
+SYNTHETIC_MODEL = "<synthetic>"
 
 #: Tool name → file operation. Mirrors the tracker's own mapping.
 FILE_TOOLS = {
@@ -312,7 +312,7 @@ class _Parser:
         out.tok_cache_read += tok_cr
         out.tok_cache_create += tok_cc
         out.cost_usd += pricing.cost(model, tok_in, tok_out, tok_cr, tok_cc)
-        if model and model != _SYNTHETIC_MODEL:
+        if model and model != SYNTHETIC_MODEL:
             out.model = model
 
         visible, reasoning, calls = features.split_content(msg.get("content"), "tool_use")
