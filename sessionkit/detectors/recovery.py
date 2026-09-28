@@ -55,7 +55,7 @@ def _lone_final_failure(session: ParsedSession) -> ToolCall | None:
 def give_up(session: ParsedSession) -> list[Anomaly]:
     """One failure, then the session ends with an apology or without comment."""
     failed = _lone_final_failure(session)
-    if failed is None or not session.messages or session.end_state.startswith("interrupted"):
+    if failed is None or not session.messages or session.end_state != "complete":
         return []
     final = session.messages[-1]
     if final.role != "assistant" or final.line <= (failed.result_line or failed.line):

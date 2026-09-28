@@ -25,6 +25,12 @@ class ScopeCreepTest(unittest.TestCase):
         s = self._session("You are fixing two issues found in a review")
         self.assertEqual(alignment.scope_creep(s), [])
 
+    def test_a_failed_edit_is_not_scope_creep(self) -> None:
+        s = df.session(messages=[df.msg(1, "user", text="review the parser")],
+                       tools=[df.call(2, "read", {"path": "/a.py"}),
+                              df.call(3, "edit", {"path": "/a.py"}, is_error=True)])
+        self.assertEqual(alignment.scope_creep(s), [])
+
 
 class UnverifiedCompletionTest(unittest.TestCase):
     def _session(self, *commands: str):
@@ -45,6 +51,20 @@ class UnverifiedCompletionTest(unittest.TestCase):
         s = df.session(messages=[df.msg(5, text="Done.", claims_done=True)], final_text="Done.")
         self.assertEqual(alignment.unverified_completion(s), [])
 
+    def test_only_a_doc_edit_is_not_unverified_completion(self) -> None:
+        tools = [df.call(2, "edit", {"path": "/README.md"})]
+        final = df.msg(20, text="All done.", claims_done=True)
+        s = df.session(tools=tools, messages=[df.msg(1, "user", text="update the docs"), final],
+                       final_text="All done.")
+        self.assertEqual(alignment.unverified_completion(s), [])
+
+    def test_a_code_edit_then_a_doc_edit_still_fires_on_the_code_edit(self) -> None:
+        tools = [df.call(2, "edit", {"path": "/a.py"}), df.call(3, "edit", {"path": "/README.md"})]
+        final = df.msg(20, text="All done.", claims_done=True)
+        s = df.session(tools=tools, messages=[df.msg(1, "user", text="fix it"), final],
+                       final_text="All done.")
+        self.assertEqual([a.lines for a in alignment.unverified_completion(s)], [[2, 20]])
+
 
 class PrematureStopTest(unittest.TestCase):
     def test_ends_on_a_stated_next_step(self) -> None:
@@ -56,6 +76,12 @@ class PrematureStopTest(unittest.TestCase):
     def test_a_finished_answer_is_not_premature(self) -> None:
         s = df.session(messages=[df.msg(4, text="Finished; all tests pass.")],
                        final_text="Finished; all tests pass.", end_state="complete")
+        self.assertEqual(alignment.premature_stop(s), [])
+
+    def test_a_non_complete_end_state_is_not_premature(self) -> None:
+        s = df.session(messages=[df.msg(1, "user", text="go"),
+                                 df.msg(4, text="I'll run the tests next.")],
+                       final_text="I'll run the tests next.", end_state="error-cascade")
         self.assertEqual(alignment.premature_stop(s), [])
 
     def test_let_me_know_is_not_premature(self) -> None:
@@ -75,6 +101,19 @@ class UserTurnsTest(unittest.TestCase):
         turns = alignment.user_turns(s)
         self.assertEqual([(t.ask.line, [c.line for c in t.calls]) for t in turns],
                          [(1, [2, 5]), (6, [7])])
+
+    def test_an_injected_record_does_not_split_a_turn(self) -> None:
+        """A harness-injected record mid-turn (e.g. a <system-reminder>) has is_prompt=False
+        and is neither a turn boundary nor an ask, the same as Claude Code's interrupt
+        marker."""
+        s = df.session("claude-code", messages=[
+            df.msg(1, "user", text="first"),
+            df.msg(3, "user", text="<system-reminder>...</system-reminder>", is_prompt=False),
+            df.msg(6, "user", text="second")],
+            tools=[df.call(2, "Read"), df.call(4, "Read"), df.call(7, "Read")])
+        turns = alignment.user_turns(s)
+        self.assertEqual([(t.ask.line, [c.line for c in t.calls]) for t in turns],
+                         [(1, [2, 4]), (6, [7])])
 
 
 class FocusProfileTest(unittest.TestCase):
@@ -101,6 +140,15 @@ class FocusProfileTest(unittest.TestCase):
         drift = [a for a in alignment.drift_candidates(self._session(tools))]
         self.assertEqual([a.lines for a in drift], [list(range(4, 12))])
 
+    def test_an_unreferenced_run_under_the_share_threshold_is_not_drift(self) -> None:
+        """8 calls clears drift_min_calls on its own, but at 8/21 (38%) it is under the 40%
+        share threshold, so it should not fire."""
+        tools = [df.call(i, "read", {"path": "/repo/sessionkit/parse.py"})
+                 for i in range(2, 15)]
+        tools += [df.call(i, "read", {"path": f"/usr/lib/node_modules/pkg/dist/{i}.js"})
+                  for i in range(15, 23)]
+        self.assertEqual(alignment.drift_candidates(self._session(tools)), [])
+
     def test_asks_without_refs_produce_no_ref_based_candidates(self) -> None:
         tools = [df.call(i, "read", {"path": f"/usr/lib/pkg/{i}.js"}) for i in range(2, 12)]
         s = self._session(tools, ask="make the profiles switchable")
@@ -113,6 +161,29 @@ class FocusProfileTest(unittest.TestCase):
                                  df.msg(34, "user", text="just write a script")], tools=tools)
         drift = alignment.drift_candidates(s)
         self.assertEqual([a.lines for a in drift], [[16, 18, 20, 22, 24, 26, 28, 30]])
+
+    def test_drift_candidate_dedupes_lines_shared_by_parallel_calls(self) -> None:
+        """pi runs parallel tool calls on one assistant line — a run of 8 calls on 4 distinct
+        lines should cite each line once, while ``count`` still reflects all 8 calls."""
+        tools = [df.call(2, "read", {"path": "/repo/sessionkit/parse.py"}),
+                 df.call(3, "edit", {"path": "/repo/sessionkit/parse.py"})]
+        lines = [4, 4, 5, 5, 6, 6, 7, 7]
+        tools += [df.call(ln, "read", {"path": f"/usr/lib/node_modules/pkg/dist/{i}.js"},
+                          tid=f"c{i}") for i, ln in enumerate(lines)]
+        drift = alignment.drift_candidates(self._session(tools))
+        self.assertEqual([a.lines for a in drift], [[4, 5, 6, 7]])
+        self.assertEqual(drift[0].count, 8)
+
+    def test_interrupt_drift_dedupes_lines_shared_by_parallel_calls(self) -> None:
+        lines = [ln for pair in range(2, 32, 2) for ln in (pair, pair)]
+        tools = [df.call(ln, "bash", {"command": f"rg x{ln}"}, tid=f"c{i}")
+                 for i, ln in enumerate(lines)]
+        s = df.session(messages=[df.msg(1, "user", text="set up two profiles"),
+                                 df.msg(33, stop="aborted"),
+                                 df.msg(34, "user", text="just write a script")], tools=tools)
+        drift = alignment.drift_candidates(s)
+        self.assertEqual([a.lines for a in drift], [[24, 26, 28, 30]])
+        self.assertEqual(drift[0].count, 8)
 
     def test_judgment_kinds_are_registered(self) -> None:
         from sessionkit import taxonomy

@@ -40,6 +40,33 @@ class InterferenceTest(unittest.TestCase):
         self.assertEqual(resource_interference([("proj", parent), ("proj", _child(60, 41))])[0],
                          [])
 
+    def test_a_sibling_call_with_empty_ts_produces_no_window(self) -> None:
+        child = df.session(sid="child", tools=[df.call(
+            55, "bash", {"command": "bash bench.sh"}, at="",
+            result_at=df.ts(101), dur_ms=41 * 60_000)])
+        found = resource_interference([("proj", _parent(65)), ("proj", child)])
+        self.assertEqual(found[0], [])
+
+    def test_a_sibling_call_with_empty_result_ts_produces_no_window(self) -> None:
+        child = df.session(sid="child", tools=[df.call(
+            55, "bash", {"command": "bash bench.sh"}, at=df.ts(60),
+            result_at="", dur_ms=41 * 60_000)])
+        found = resource_interference([("proj", _parent(65)), ("proj", child)])
+        self.assertEqual(found[0], [])
+
+    def test_mixed_z_and_offset_timestamps_still_overlap(self) -> None:
+        """The error's timestamp uses ``Z`` and the window's boundaries use ``+00:00`` (or
+        vice versa) — both are the same instant and must still compare as overlapping."""
+        parent = df.session(sid="parent", messages=[
+            df.msg(1, "user", text="go", at=df.ts(0)),
+            df.msg(79, stop="error", error_text="Request timed out.",
+                  at=df.ts(65).replace("Z", "+00:00"))])
+        child = df.session(sid="child", tools=[df.call(
+            55, "bash", {"command": "bash bench.sh"}, at=df.ts(60).replace("Z", "+00:00"),
+            result_at=df.ts(101), dur_ms=41 * 60_000)])
+        found = resource_interference([("proj", parent), ("proj", child)])
+        self.assertEqual([a.lines for a in found[0]], [[79]])
+
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

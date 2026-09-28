@@ -31,6 +31,7 @@ _IMPLEMENT = re.compile(
     r"renam(?:e(?:s|d)?|ing))\b", re.I)
 _NEGATED = re.compile(r"\b(?:don'?t|do not|never|without)\s+\w+", re.I)
 _CHANGE_ROLES = ("edit", "write")
+_DOC_EXTENSIONS = (".md", ".rst", ".txt")
 
 
 @dataclass
@@ -74,15 +75,27 @@ def scope_creep(session: ParsedSession) -> list[Anomaly]:
     return out
 
 
+def _is_doc_only(session: ParsedSession, call: ToolCall) -> bool:
+    """Whether every path a change touches is documentation (``.md``, ``.rst``, ``.txt``)."""
+    paths = call_paths(session.harness, call)
+    return bool(paths) and all(p.lower().endswith(_DOC_EXTENSIONS) for p in paths)
+
+
 def unverified_completion(session: ParsedSession) -> list[Anomaly]:
-    """A final completion claim with no test/build command after the last successful change."""
+    """A final completion claim with no test/build command after the last non-doc change.
+
+    A change that only touches documentation (``.md``, ``.rst``, ``.txt``) doesn't need a
+    test run to verify, so it is excluded — a real-corpus check found 57 of 70 hits were
+    exactly this: the last change before a completion claim was a ``.md`` file.
+    """
     if not session.messages or session.messages[-1].role != "assistant":
         return []
     final = session.messages[-1]
     if not claims_done(session.final_text or final.preview):
         return []
     changes = [i for i, c in enumerate(session.tools)
-               if role(session.harness, c.name) in _CHANGE_ROLES and not c.is_error]
+               if role(session.harness, c.name) in _CHANGE_ROLES and not c.is_error
+               and not _is_doc_only(session, c)]
     if not changes:
         return []
     last_change = changes[-1]
@@ -180,6 +193,22 @@ def _program_named(key: str, refs: list[str]) -> bool:
     return key.startswith("exec:") and key[len("exec:"):] in refs
 
 
+def _dedupe_lines(lines: list[int]) -> list[int]:
+    """Distinct line numbers in first-seen order.
+
+    pi records parallel tool calls as separate calls sharing one assistant line, so a run's
+    ``lines`` can repeat a line number several times in a row; citing the same line twice adds
+    nothing to the finding.
+    """
+    seen: set[int] = set()
+    out: list[int] = []
+    for line in lines:
+        if line not in seen:
+            seen.add(line)
+            out.append(line)
+    return out
+
+
 def drift_candidates(session: ParsedSession) -> list[Anomaly]:
     """Unreferenced runs that dominate a turn, plus the calls before each user interrupt."""
     out: list[Anomaly] = []
@@ -194,7 +223,7 @@ def drift_candidates(session: ParsedSession) -> list[Anomaly]:
             out.append(Anomaly("drift-candidate",
                                f"{len(run.lines)} calls ({share:.0%} of the turn) on {run.key}, "
                                "which the ask never referenced",
-                               len(run.lines), run.lines[:MAX_LINES]))
+                               len(run.lines), _dedupe_lines(run.lines)[:MAX_LINES]))
     out.extend(_interrupt_drift(session))
     return out
 
@@ -208,9 +237,10 @@ def _interrupt_drift(session: ParsedSession) -> list[Anomaly]:
         point = interrupt.lines[0]
         ask_line = max((m.line for m in session.messages if _is_ask(m) and m.line < point),
                        default=0)
-        window = [c.line for c in session.tools if ask_line < c.line <= point][-size:]
-        if window:
+        calls = [c for c in session.tools if ask_line < c.line <= point][-size:]
+        if calls:
+            lines = _dedupe_lines([c.line for c in calls])
             out.append(Anomaly("drift-candidate",
-                               f"the {len(window)} calls before the user interrupt at line "
-                               f"{point}", len(window), window))
+                               f"the {len(calls)} calls before the user interrupt at line "
+                               f"{point}", len(calls), lines))
     return out

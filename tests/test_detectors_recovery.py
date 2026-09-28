@@ -36,12 +36,12 @@ class ErrorIgnoredTest(unittest.TestCase):
 
 
 class GiveUpTest(unittest.TestCase):
-    def _session(self, final_text: str, errors: int = 1):
+    def _session(self, final_text: str, errors: int = 1, end_state: str = "complete", **kw):
         tools = [df.call(i, is_error=True, err_class="exit-code", result_line=i)
                  for i in range(2, 2 + errors)]
-        final = df.msg(10, text=final_text)
+        final = df.msg(10, text=final_text, **kw)
         return df.session(tools=tools, messages=[df.msg(1, "user", text="go"), final],
-                          final_text=final_text, end_state="complete")
+                          final_text=final_text, end_state=end_state)
 
     def test_one_failure_then_an_apology(self) -> None:
         s = self._session("Sorry, I cannot get this command to work.")
@@ -52,6 +52,18 @@ class GiveUpTest(unittest.TestCase):
 
     def test_a_completion_claim_is_not_giving_up(self) -> None:
         self.assertEqual(recovery.give_up(self._session("Done, it works now.")), [])
+
+    def test_a_final_api_error_turn_is_not_giving_up(self) -> None:
+        """A lone tool failure followed by a final API-error turn ends the session in
+        error-cascade, not complete — the model never got a chance to respond at all."""
+        s = self._session("", end_state="error-cascade", stop="error",
+                          error_text="API Error: 529 overloaded")
+        self.assertEqual(recovery.give_up(s), [])
+
+    def test_an_interrupted_end_state_is_not_giving_up(self) -> None:
+        s = self._session("Sorry, I cannot get this command to work.",
+                          end_state="interrupted-tool")
+        self.assertEqual(recovery.give_up(s), [])
 
 
 if __name__ == "__main__":  # pragma: no cover
