@@ -188,6 +188,18 @@ class EndStateTest(unittest.TestCase):
             Message(uuid="u", line=84, ts="", role="user", text_len=5, preview="hello")])
         self.assertEqual(derive_end_state(session)[0], "agent-unresponsive")
 
+    def test_agent_unresponsive_after_an_errored_turn(self) -> None:
+        from sessionkit.parse import Message
+        for stop, expected in (("error", "agent-unresponsive"), ("end", "interrupted-user")):
+            with self.subTest(stop):
+                session = _session()
+                session.messages.extend([
+                    Message(uuid="a", line=79, ts="", role="assistant", stop_reason=stop,
+                            error_text="Connection error." if stop == "error" else ""),
+                    Message(uuid="u", line=80, ts="", role="user", text_len=5,
+                            preview="hello")])
+                self.assertEqual(derive_end_state(session)[0], expected)
+
 
 class DetectorTest(unittest.TestCase):
     """Each detector fires on its pattern and stays silent otherwise."""

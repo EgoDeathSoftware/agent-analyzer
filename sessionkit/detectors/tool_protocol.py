@@ -13,8 +13,8 @@ SURFACED_FAMILIES = ("tool-protocol", "generation", "environment")
 def _surfaced(name: str) -> bool:
     """Surface a class only if it names something fixable (fix target is not ``none``)."""
     entry = lookup(name)
-    return entry is not None and entry.family in SURFACED_FAMILIES and \
-        entry.fix_target != "none"
+    return (entry is not None and entry.family in SURFACED_FAMILIES
+            and entry.fix_target != "none")
 
 
 def error_classes(session: ParsedSession) -> list[Anomaly]:

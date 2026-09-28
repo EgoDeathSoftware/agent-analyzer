@@ -66,8 +66,8 @@ def hung(session: ParsedSession, live: bool) -> list[Anomaly]:
     # Only pi persists an unfinished stream as an assistant message with no stop reason;
     # Claude Code writes stop_reason null on every intermediate per-block record.
     last = session.messages[-1] if session.messages else None
-    if session.harness == "pi" and last is not None and last.role == "assistant" \
-            and last.stop_reason == "":
+    if (session.harness == "pi" and last is not None and last.role == "assistant"
+            and last.stop_reason == ""):
         return [Anomaly("hung", "final model turn never finished streaming", 1, [last.line])]
     return []
 

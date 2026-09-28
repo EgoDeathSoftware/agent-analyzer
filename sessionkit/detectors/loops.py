@@ -42,8 +42,8 @@ def file_thrash(session: ParsedSession) -> list[Anomaly]:
     out = []
     for path, lines in edits.items():
         many = len(lines) >= THRESHOLDS["file_thrash"]
-        failing = len(lines) >= THRESHOLDS["file_thrash_min"] and \
-            failures.get(path, 0) >= THRESHOLDS["file_thrash_failures"]
+        failing = (len(lines) >= THRESHOLDS["file_thrash_min"]
+                   and failures.get(path, 0) >= THRESHOLDS["file_thrash_failures"])
         if many or failing:
             out.append(Anomaly("file-thrash", path, len(lines), lines))
     return out
@@ -68,8 +68,8 @@ def read_loop(session: ParsedSession) -> list[Anomaly]:
             continue
         if item.op != "read":
             continue
-        refresh = item.path in edited or \
-            read_at_compaction.get(item.path, compactions) < compactions
+        refresh = (item.path in edited
+                   or read_at_compaction.get(item.path, compactions) < compactions)
         edited.discard(item.path)
         read_at_compaction[item.path] = compactions
         if not refresh:
