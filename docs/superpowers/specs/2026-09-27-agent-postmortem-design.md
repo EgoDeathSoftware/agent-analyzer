@@ -74,7 +74,7 @@ generic classes stay error-only, as today.
 | `sibling-cascade` | `Sibling tool call errored` | tool protocol | — (not counted toward `error-cascade` runs) |
 | `aborted` | `[Request interrupted by user`, pi `Operation aborted`, `Command aborted` | lifecycle | — |
 | `tool-error-structured` | body starts with `{"ok": false` | environment | env |
-| `policy-denied` | widen: `File is in a directory that is denied by your permission`, worktree-isolation blocks (`This session is isolated in the worktree`), pi `Tool execution was blocked` | environment | harness |
+| `policy-denied` | widen: `File is in a directory that is denied by your permission`, worktree-isolation blocks (`This session is isolated in the worktree`), pi `Tool execution was blocked`, pi `Denied by deny-list:` | environment | harness |
 | `user-rejected` | widen: `The user doesn't want to take this action` | environment | — |
 | `api-error` / `context-overflow` / `auth` / `rate-limit` / `network` | classified from `Message.error_text` (§4): overflow (`maximum context length`, `context length exceeded`, pi `Context overflow recovery failed`); auth (`invalid_grant`, `OAuth`, `401`, `403`); network (`ECONNREFUSED`, `fetch failed`, DNS); `Provider finish_reason:` becomes `api-error`. The `context-overflow` hint names the harness fix first: the model's `maxTokens` output reservation eats into the context window (32,768 reserved on a 131,072 window leaves 98K for the conversation) | environment | env / harness |
 
@@ -89,11 +89,11 @@ generic classes stay error-only, as today.
 | `output-truncated` | assistant message with `stop_reason == "length"` (in addition to the error class) | S | generation | harness |
 | `repeat-tool` | identical `(tool, input)` ≥ 3; calls with role `poll` are exempt | S | loop | model |
 | `edit-mismatch-spiral` | ≥ 3 `edit-mismatch` failures on the same path | S | loop | model |
-| `read-only-spiral` | ≥ 8 consecutive `read`/`search` role calls with no `edit`/`write`/`exec` call and no assistant visible text ≥ 200 chars between them | S | loop | model |
-| `file-thrash` | **retuned**: ≥ 8 edits to one path, or ≥ 5 edits of which ≥ 2 failed | S | loop | model |
+| `read-only-spiral` | ≥ 12 consecutive `read`/`search` role calls with no `edit`/`write`/`exec` call and no assistant visible text ≥ 200 chars between them | S | loop | model |
+| `file-thrash` | **retuned**: ≥ 12 edits to one path, or ≥ 5 edits of which ≥ 2 failed | S | loop | model |
 | `read-loop` | **retuned**: ≥ 5 reads of one path, not counting reads that follow a compaction or an edit of that path | S | loop | model |
 | `error-cascade`, `hook-pingpong`, `rejection-persist`, `agent-kill`, `orphan-subagent`, `compaction-churn` | unchanged, except `sibling-cascade` is excluded from runs, the compaction check uses the normalized `compaction` subtype, and the subagent check uses role `dispatch` | S | loop / lifecycle | as today |
-| `stall` | **fixed**: roles `ask-user`, `dispatch`, `poll`, `edit`, `write` are excluded (their duration includes human approval or background work); `exec` fires at > 600 s **only if the call declared no timeout**; a call with a declared timeout fires only when it runs to ≥ 90% of it (a long benchmark with an explicit timeout is deliberate); everything else at > 120 s | S | lifecycle | env |
+| `stall` | **fixed**: roles `ask-user`, `dispatch`, `poll`, `edit`, `write` are excluded (their duration includes human approval or background work); `exec` fires at > 1200 s **only if the call declared no timeout**; a call with a declared timeout fires only when it runs to ≥ 90% of it (a long benchmark with an explicit timeout is deliberate); everything else at > 300 s. Claude Code durations include the wait for permission approval, so two cases are excluded there: an `exec` past its declared timeout by > 5%, and local `read`/`search` tools (WebSearch/WebFetch still count) | S | lifecycle | env |
 | `hung` | not live, and either the end state is `interrupted-tool` on a call whose role is not `ask-user` or `dispatch`, or the last assistant message has `stop_reason == ""` (the stream never finished) | S | lifecycle | env / harness |
 | `abrupt-truncation` | `last_line_malformed` and not live | S | lifecycle | — |
 | `user-interrupt` | an aborted assistant turn (or `aborted` tool result) followed by a new user message. The user's redirect is the strongest available drift signal: the run of calls before the interrupt becomes a `drift-candidate` even when the ask had no refs (§3.4) | S | lifecycle | — |
