@@ -5,6 +5,7 @@ from __future__ import annotations
 import unittest
 
 from sessionkit.detectors import detect, lifecycle
+from sessionkit.taxonomy import THRESHOLDS
 from tests import detector_fixtures as df
 
 
@@ -14,9 +15,10 @@ def _kinds(session, live: bool = False) -> list[str]:
 
 class StallTest(unittest.TestCase):
     CASES = [
-        ("pi", "read", {}, 200_000, True),
-        ("pi", "bash", {"command": "x"}, 300_000, False),
-        ("pi", "bash", {"command": "x"}, 700_000, True),
+        ("pi", "read", {}, 200_000, False),
+        ("pi", "read", {}, 420_000, True),
+        ("pi", "bash", {"command": "x"}, 700_000, False),
+        ("pi", "bash", {"command": "x"}, 1_300_000, True),
         ("pi", "bash", {"command": "x", "timeout": 30}, 28_000, True),
         ("pi", "bash", {"command": "x", "timeout": 30}, 10_000, False),
         ("claude-code", "Bash", {"command": "x", "timeout": 600_000}, 400_000, False),
@@ -24,12 +26,38 @@ class StallTest(unittest.TestCase):
         ("claude-code", "AskUserQuestion", {}, 900_000, False),
         ("pi", "subagent", {}, 3_600_000, False),
     ]
+    MIN = 60_000
+    APPROVAL_CASES = [
+        ("claude-code", "Read", {}, 7 * MIN, False),
+        ("claude-code", "Grep", {}, 7 * MIN, False),
+        ("claude-code", "Bash", {"command": "x", "timeout": 60_000}, 20 * MIN, False),
+        ("claude-code", "Bash", {"command": "x", "timeout": 600_000}, 580_000, True),
+        ("claude-code", "Bash", {"command": "x", "timeout": 600_000}, 620_000, True),
+        ("claude-code", "Bash", {"command": "x", "timeout": 600_000}, 11 * MIN, False),
+        ("pi", "read", {}, 7 * MIN, True),
+        ("claude-code", "Bash", {"command": "x"}, 15 * MIN, False),
+        ("claude-code", "Bash", {"command": "x"}, 25 * MIN, True),
+        ("claude-code", "WebFetch", {}, 6 * MIN, True),
+        ("claude-code", "WebFetch", {}, 4 * MIN, False),
+        ("claude-code", "WebSearch", {}, 6 * MIN, True),
+        ("claude-code", "mcp__srv__lookup", {}, 6 * MIN, True),
+    ]
 
     def test_cases(self) -> None:
         for harness, name, args, dur, expected in self.CASES:
             with self.subTest(harness=harness, name=name, dur=dur):
                 s = df.session(harness, tools=[df.call(1, name, args, dur_ms=dur)])
                 self.assertEqual("stall" in _kinds(s), expected)
+
+    def test_claude_code_approval_wait_is_not_a_stall(self) -> None:
+        for harness, name, args, dur, expected in self.APPROVAL_CASES:
+            with self.subTest(harness=harness, name=name, dur=dur):
+                s = df.session(harness, tools=[df.call(1, name, args, dur_ms=dur)])
+                self.assertEqual("stall" in _kinds(s), expected)
+
+    def test_thresholds(self) -> None:
+        self.assertEqual(THRESHOLDS["stall_ms"], 300_000)
+        self.assertEqual(THRESHOLDS["stall_exec_ms"], 1_200_000)
 
 
 class HungTest(unittest.TestCase):

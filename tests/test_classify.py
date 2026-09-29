@@ -271,7 +271,7 @@ class DetectorTest(unittest.TestCase):
 
     def test_stall(self) -> None:
         session = _session()
-        session.tools.append(_call(1, name="Read", dur=200_000))
+        session.tools.append(_call(1, name="Read", dur=400_000))
         self.assertIn("stall", _kinds(session))
 
     def test_stall_negative_fast_call(self) -> None:

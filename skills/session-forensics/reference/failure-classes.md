@@ -251,7 +251,8 @@ S · lifecycle · fix: harness
 ### `stall`
 S · lifecycle · fix: env
 - **What:** a tool call ran far too long. Commands with a declared timeout only count near
-  that timeout.
+  that timeout. In Claude Code, local reads and searches, and commands that overran their
+  declared timeout, are skipped because their duration includes waiting for approval.
 - **Confirm:** check what the command was waiting on: network, a lock, or an interactive
   prompt.
 - **Fix:** give the command a timeout. Avoid interactive commands.

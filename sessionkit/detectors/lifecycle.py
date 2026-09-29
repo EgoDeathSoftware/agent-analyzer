@@ -41,9 +41,26 @@ def stalls(session: ParsedSession) -> list[Anomaly]:
             for c in session.tools if c.dur_ms is not None and _is_stall(session.harness, c)]
 
 
+#: Claude Code's call duration includes the wait for the user's permission approval.
+_TIMEOUT_OVERRUN = 1.05
+_REMOTE_SEARCH = frozenset({"WebSearch", "WebFetch"})
+
+
+def _duration_is_approval_wait(harness: str, call: ToolCall, call_role: str) -> bool:
+    """Whether a Claude Code call's duration cannot have been the tool's own."""
+    if harness != "claude-code":
+        return False
+    if call_role in ("read", "search"):
+        return not (call.name.startswith("mcp__") or call.name in _REMOTE_SEARCH)
+    if call_role == "exec":
+        timeout = declared_timeout_ms(harness, call)
+        return bool(timeout) and call.dur_ms > _TIMEOUT_OVERRUN * timeout
+    return False
+
+
 def _is_stall(harness: str, call: ToolCall) -> bool:
     call_role = role(harness, call.name)
-    if call_role in _NO_STALL_ROLES:
+    if call_role in _NO_STALL_ROLES or _duration_is_approval_wait(harness, call, call_role):
         return False
     if call_role != "exec":
         return call.dur_ms > THRESHOLDS["stall_ms"]

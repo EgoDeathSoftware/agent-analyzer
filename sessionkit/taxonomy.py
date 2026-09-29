@@ -33,8 +33,8 @@ THRESHOLDS: dict[str, float] = {
     "read_only_text_chars": 200,  # an assistant answer at least this long breaks the run
     "hook_pingpong": 2,     # hook blocks against the same tool
     "compaction_churn": 2,  # compaction events
-    "stall_ms": 120_000,    # a single tool call taking longer than this
-    "stall_exec_ms": 600_000,        # a command with no declared timeout running this long
+    "stall_ms": 300_000,    # a single tool call taking longer than this
+    "stall_exec_ms": 1_200_000,       # a command with no declared timeout running this long
     "stall_timeout_fraction": 0.9,   # a command reaching this share of its declared timeout
     "degeneration_ratio": 0.5,          # repeated word 8-grams within one message
     "generation_stall_ms": 600_000,     # a model turn slower than this ...
