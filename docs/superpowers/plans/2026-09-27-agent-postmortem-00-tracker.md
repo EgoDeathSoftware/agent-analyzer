@@ -24,7 +24,7 @@ tests and commands.
 | 3 | [`2026-09-27-agent-postmortem-03-detectors-core.md`](2026-09-27-agent-postmortem-03-detectors-core.md) | 7, 8, 9, 10 | The new and widened error classes; the tool-protocol, generation, loop and lifecycle detectors; the new end states; liveness passed into the detectors. | done |
 | 4 | [`2026-09-27-agent-postmortem-04-detectors-judgment.md`](2026-09-27-agent-postmortem-04-detectors-judgment.md) | 11, 12, 13 | The recovery and alignment candidates, the focus profile, drift candidates, resource interference, and the registry completeness tests. | done |
 | 5 | [`2026-09-27-agent-postmortem-05-cli.md`](2026-09-27-agent-postmortem-05-cli.md) | 14, 15 | `sk forensics` as the post-mortem report; `sk findings` with rates; `errors --group-by model\|harness`; `index --finding`. | done |
-| 6 | [`2026-09-27-agent-postmortem-06-skills-validation.md`](2026-09-27-agent-postmortem-06-skills-validation.md) | 16, 17, 18 | The failure-class knowledge base, the post-mortem and fleet skills, the README, corpus acceptance, the dry-run regression and real pi sessions. | todo |
+| 6 | [`2026-09-27-agent-postmortem-06-skills-validation.md`](2026-09-27-agent-postmortem-06-skills-validation.md) | 16, 17, 18 | The failure-class knowledge base, the post-mortem and fleet skills, the README, corpus acceptance, the dry-run regression and real pi sessions. | done |
 
 ## Tasks
 
@@ -43,9 +43,9 @@ tests and commands.
 - [x] **T13** (CP4) Cross-session resource interference, and registry completeness — commit: `0d7d5bb`
 - [x] **T14** (CP5) `sk forensics` becomes the post-mortem report — commit: `fc21d6d`
 - [x] **T15** (CP5) `sk findings` fleet view, `errors --group-by model|harness`, and `index --finding` — commit: `fe4ff75`
-- [ ] **T16** (CP6) The failure-class knowledge base and parity tests — commit: `—`
-- [ ] **T17** (CP6) The post-mortem skill, the fleet skill, and the README — commit: `—`
-- [ ] **T18** (CP6) Validation — corpus acceptance, dry-run regression, real pi sessions — commit: `—`
+- [x] **T16** (CP6) The failure-class knowledge base and parity tests — commit: `4bc1b30`
+- [x] **T17** (CP6) The post-mortem skill, the fleet skill, and the README — commit: `23d6ff7`
+- [x] **T18** (CP6) Validation — corpus acceptance, dry-run regression, real pi sessions — commits: `296228a`, `224b23b`, `e11d3de`, plus the final-review fix wave (session-forensics budget, spiral tests, lifecycle dead clause, README, spec)
 
 ## Log
 
@@ -206,3 +206,17 @@ tests and commands.
   single-session output. `_GROUP_KEY` and `_FINDING_GROUP` duplicate the model/harness keys, and
   `cmd_findings` applies the scope twice. Deferred from CP3 still: pi has no liveness registry
   (recent-mtime heuristic), and `sk show` skips the cross-session pass.
+- 2026-09-29 — CP6 done (T16-T18); suite 503 OK. Acceptance before->after on 1,276->1,280 real
+  sessions: stall 15.1%->8.5%, other 85->85, file-thrash real-failure 9/55->5/14 (still not a
+  majority; the user chose threshold 12 knowing this), read-only-spiral 10.3%->4.8%, pi-mother
+  bash classified 23/27->27/27. User-approved rule changes: read-only-spiral and file-thrash
+  thresholds 8->12 (296228a), stall limits 300 s non-exec / 1200 s exec without a declared
+  timeout plus Claude Code approval-wait exclusions (224b23b), pi `Denied by deny-list:` as
+  policy-denied (e11d3de). Dry-run regression 01a0db1d/01a0db2c: all expectations met. Real pi
+  sessions: truncation reproduced (output-truncated, 01a0eefe); Esc abort gives state aborted
+  with no finding (as designed); long context not reproduced (30-min timeout before any
+  compaction or leak). Deferred: a pi session killed between turns (last stop tool_use, results
+  written) reads `complete` and needs the pi liveness heuristic; read-only-spiral fires on
+  explicit "read everything" asks; Claude Code Bash with no declared timeout has a 120 s
+  default, so long no-timeout Bash is also likely approval wait (follow-up heuristic);
+  `skills/unfinished-work/SKILL.md` still lacks the new end states.
