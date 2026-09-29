@@ -14,7 +14,7 @@ from datetime import datetime, timedelta, timezone
 
 from sessionkit import __version__, corpus as corpus_mod, pricing, query, search
 from sessionkit import sources as src_mod
-from sessionkit.taxonomy import classify_error
+from sessionkit.taxonomy import TIER_CANDIDATE, classify_error
 from sessionkit.corpus import Corpus
 from sessionkit.render import (BUDGET_AGGREGATE_KB, BUDGET_EXCERPT_KB, BUDGET_INDEX_KB,
                                Report, human_cost)
@@ -240,30 +240,42 @@ def cmd_hooks(corpus: Corpus, args: argparse.Namespace) -> str:
 
 
 def cmd_forensics(corpus: Corpus, args: argparse.Namespace) -> str:
-    """Why one session went wrong: findings, a line-anchored timeline, and what went right.
+    """Why one session went wrong: tiered findings, the focus profile, an anchored timeline,
+    and health.
 
     Deterministic by design — findings and hints are looked up from the detectors and
-    ``taxonomy``, not generated, so this is a report, not a narrative.
+    ``taxonomy``, not generated, so this is a report, not a narrative. The narrative is the
+    ``session-forensics`` skill's job.
     """
     entry = query.find_session(corpus, args.sid)
     if entry is None:
         raise SystemExit(f"no session matching {args.sid!r} (try `sk index`)")
-
+    session = entry.session
     findings = query.forensics_findings(entry)
-    health = query.forensics_health(entry)
 
     report = Report(args.json, args.budget_kb or BUDGET_EXCERPT_KB)
-    report.meta(sid=entry.session.sid, project=entry.project_key,
-               state=entry.session.end_state, findings=len(findings))
-    if entry.session.end_reason:
-        report.text(f"End reason: {entry.session.end_reason}")
+    report.meta(sid=session.sid, project=entry.project_key, harness=session.harness or "-",
+                model=session.model or "-", state=session.end_state, findings=len(findings))
+    if session.end_reason:
+        report.text(f"End reason: {session.end_reason}")
 
     report.section("Findings")
     report.table(
-        ["kind", "detail", "count", "lines", "prevention"],
-        [[f["kind"], f["detail"], f["count"], ",".join(str(n) for n in f["lines"]), f["hint"]]
-         for f in findings],
+        ["tier", "family", "kind", "detail", "count", "lines", "fix_target", "hint"],
+        [["candidate" if f["tier"] == TIER_CANDIDATE else f["tier"], f["family"], f["kind"],
+          f["detail"], f["count"], ",".join(str(n) for n in f["lines"]), f["fix_target"],
+          f["hint"]] for f in findings],
         key="findings",
+    )
+    if any(f["tier"] == TIER_CANDIDATE for f in findings):
+        report.text("Rows marked `candidate` are hypotheses: confirm or dismiss each against "
+                    "its cited lines before reporting it.")
+    report.section("Focus profile")
+    report.table(
+        ["turn", "ask", "run", "calls", "share", "referenced"],
+        [[r["turn"], r["ask"], r["run"], r["calls"], r["share"], r["referenced"]]
+         for r in query.focus_profile_rows(entry)],
+        key="focus",
     )
     report.section("Timeline (finding-anchored)")
     report.table(
@@ -272,15 +284,27 @@ def cmd_forensics(corpus: Corpus, args: argparse.Namespace) -> str:
          for r in query.forensics_timeline(entry)],
         key="timeline",
     )
+    _forensics_health_section(report, query.forensics_health(entry))
+    return report.render()
+
+
+def _forensics_health_section(report: Report, health: query.Row) -> None:
+    """Tool success plus model behaviour: stop reasons, empty turns, reasoning, latency."""
+    stops = ", ".join(f"{k}={v}" for k, v in sorted(health["stop_reasons"].items())) or "-"
+    ratio = health["reasoning_ratio"]
+    latency = health["median_latency_s"]
     report.section("Health")
     report.table(
         ["metric", "value"],
         [["tool calls", health["tool_calls"]], ["succeeded", health["succeeded"]],
          ["failed", health["failed"]],
-         ["success rate", _pct(health["succeeded"], health["tool_calls"])]],
+         ["success rate", _pct(health["succeeded"], health["tool_calls"])],
+         ["stop reasons", stops], ["empty turns", health["empty_turns"]],
+         ["reasoning/visible", "-" if ratio is None else ratio],
+         ["compactions", health["compactions"]],
+         ["median turn latency", "-" if latency is None else f"{latency}s"]],
         key="health",
     )
-    return report.render()
 
 
 def cmd_children(corpus: Corpus, args: argparse.Namespace) -> str:

@@ -14,13 +14,17 @@ from __future__ import annotations
 import fnmatch
 import json
 import os
+import statistics
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path, PurePath
 from typing import Any, Callable, Iterable
 
 from sessionkit import features, pricing, settingsjson as sj
-from sessionkit.taxonomy import lookup, signature
+from sessionkit.detectors.alignment import focus_profile
+from sessionkit.detectors.base import assistant_turns
+from sessionkit.detectors.generation import assistant_latencies
+from sessionkit.taxonomy import TIER_CANDIDATE, TIER_J, TIER_S, lookup, signature
 from sessionkit.corpus import Corpus, Loaded
 from sessionkit.harness import role
 from sessionkit.parse import ToolCall, block_text, read_line
@@ -736,14 +740,22 @@ def deny_rows(corpus: Corpus, scope: Filter) -> list[Row]:
 
 # --- forensics ------------------------------------------------------------------------------
 
+_TIER_ORDER = {TIER_S: 0, TIER_CANDIDATE: 1, TIER_J: 2}
+
+
 def forensics_findings(entry: Loaded) -> list[Row]:
-    """One session's anomalies, most frequent first, each with its prevention hint."""
-    ordered = sorted(entry.anomalies, key=lambda a: -a.count)
+    """One session's findings: structural first, then candidates, most frequent first within
+    a tier. Each carries its taxonomy tier, family, fix target and hint."""
     rows = []
-    for a in ordered:
+    for a in entry.anomalies:
         known = lookup(a.kind)
         rows.append({"kind": a.kind, "detail": a.detail, "count": a.count, "lines": a.lines,
+                     "tier": known.tier if known else TIER_S,
+                     "family": known.family if known else "",
+                     "fix_target": known.fix_target if known else "",
                      "hint": known.hint if known else ""})
+    rows.sort(key=lambda r: (_TIER_ORDER.get(r["tier"], len(_TIER_ORDER)), -r["count"],
+                             r["kind"]))
     return rows
 
 
@@ -754,10 +766,66 @@ def forensics_timeline(entry: Loaded) -> list[Row]:
 
 
 def forensics_health(entry: Loaded) -> Row:
-    """Totals for the 'what went right' counterweight: a forensics report is not pure negativity."""
-    tools = entry.session.tools
+    """The 'what went right' counterweight, plus how the model itself behaved.
+
+    ``stop_reasons`` and ``empty_turns`` are counted per whole model message (one
+    :func:`~sessionkit.detectors.base.assistant_turns` group), not per record — Claude Code
+    writes one record per content block and every record carries the message's final stop
+    reason, so per-record counts would double both. ``median_latency_s`` keeps only the
+    latency of each group's first record, so per-block gaps within one message can't drag the
+    median down.
+    """
+    session = entry.session
+    tools = session.tools
     failed = sum(1 for t in tools if is_failure(t))
-    return {"tool_calls": len(tools), "failed": failed, "succeeded": len(tools) - failed}
+    assistants = [m for m in session.messages if m.role == "assistant"]
+    turns = assistant_turns(session)
+    stops: dict[str, int] = {}
+    empty_turns = 0
+    first_uuids = {turn[0].uuid for turn in turns}
+    for turn in turns:
+        key = turn[-1].stop_reason or "unrecorded"
+        stops[key] = stops.get(key, 0) + 1
+        if key == "end" and not any(m.tool_calls or m.text_len for m in turn):
+            empty_turns += 1
+    visible = sum(m.text_len for m in assistants)
+    reasoning = sum(m.reasoning_len for m in assistants)
+    latencies = [ms for m, ms in assistant_latencies(session) if m.uuid in first_uuids]
+    return {
+        "tool_calls": len(tools), "failed": failed, "succeeded": len(tools) - failed,
+        "stop_reasons": stops,
+        "empty_turns": empty_turns,
+        "reasoning_ratio": round(reasoning / visible, 2) if visible else None,
+        "compactions": sum(1 for e in session.sysev if e.subtype == "compaction"),
+        "median_latency_s": int(statistics.median(latencies) // 1000) if latencies else None,
+    }
+
+
+def focus_profile_rows(entry: Loaded) -> list[Row]:
+    """Per user turn, where the effort went. A turn holding a drift candidate is expanded
+    into its runs; every other turn is one summary row, so long sessions stay in budget.
+
+    A run's ``referenced`` is printed ``-`` rather than yes/no when the ask named no refs at
+    all: :class:`~sessionkit.detectors.alignment.Run` defaults ``referenced`` to ``True`` when
+    there is nothing to check it against, which would otherwise misleadingly read ``yes``.
+    """
+    flagged = {line for a in entry.anomalies if a.kind == "drift-candidate" for line in a.lines}
+    rows: list[Row] = []
+    for turn in focus_profile(entry.session):
+        expanded = turn.calls and any(flagged.intersection(r.lines) for r in turn.runs)
+        if not expanded:
+            rows.append({"turn": turn.ask_line, "ask": turn.ask_preview, "run": "-",
+                         "calls": turn.calls, "share": "", "referenced": ""})
+            continue
+        for run in turn.runs:
+            if not turn.refs:
+                referenced = "-"
+            else:
+                referenced = "yes" if run.referenced else "no"
+            rows.append({"turn": turn.ask_line, "ask": turn.ask_preview, "run": run.key,
+                         "calls": len(run.lines), "share": f"{len(run.lines) / turn.calls:.0%}",
+                         "referenced": referenced})
+    return rows
 
 
 # --- children ---------------------------------------------------------------------------

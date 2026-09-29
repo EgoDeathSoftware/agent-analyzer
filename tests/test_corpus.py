@@ -467,6 +467,19 @@ class ForensicsTest(unittest.TestCase):
                                     ts="2026-08-01T00:00:09Z"))
         fx.write(self.home, records, name="aaaa1111.jsonl")
 
+    def _write_candidate_session(self) -> None:
+        """The looping session, ending on a stated next step (a premature-stop candidate)."""
+        records = [fx.user("do the thing")]
+        for i in range(3):
+            records.append(fx.assistant(
+                [fx.tool_use(f"t{i}", "Bash", {"command": "flaky-check"})],
+                ts=f"2026-08-01T00:00:0{i}Z"))
+            records.append(fx.tool_result(f"t{i}", "still not ready",
+                                          ts=f"2026-08-01T00:00:0{i}Z"))
+        records.append(fx.assistant([{"type": "text", "text": "I'll add the tests next."}],
+                                    ts="2026-08-01T00:00:09Z", stop_reason="end_turn"))
+        fx.write(self.home, records, name="aaaa1111.jsonl")
+
     def _args(self, *argv: str):
         return cli.build_parser().parse_args(list(argv))
 
@@ -517,6 +530,89 @@ class ForensicsTest(unittest.TestCase):
         out = cli.cmd_forensics(loaded, self._args("forensics", sid))
         self.assertIn("(none)", out)
         self.assertIn("succeeded", out)
+
+    def test_findings_carry_tier_family_and_fix_target(self) -> None:
+        self._write_looping_session()
+        entry = next(iter(corpus.load().sessions))
+        repeat = next(f for f in query.forensics_findings(entry) if f["kind"] == "repeat-tool")
+        self.assertEqual((repeat["tier"], repeat["family"], repeat["fix_target"]),
+                         ("S", "loop", "model"))
+
+    def test_candidates_sort_after_structural_findings(self) -> None:
+        self._write_candidate_session()
+        entry = next(iter(corpus.load().sessions))
+        tiers = [f["tier"] for f in query.forensics_findings(entry)]
+        self.assertIn("S->J", tiers)
+        order = ["S", "S->J", "J"]
+        self.assertEqual(tiers, sorted(tiers, key=order.index))
+
+    def test_health_reports_stop_reasons_and_latency(self) -> None:
+        self._write_looping_session()
+        health = query.forensics_health(next(iter(corpus.load().sessions)))
+        self.assertIn("unrecorded", health["stop_reasons"])
+        self.assertIsNotNone(health["median_latency_s"])
+        self.assertEqual(health["compactions"], 0)
+
+    def test_cli_report_has_focus_profile_and_candidate_note(self) -> None:
+        self._write_candidate_session()
+        loaded = corpus.load()
+        out = cli.cmd_forensics(loaded, self._args("forensics", loaded.sessions[0].session.sid))
+        self.assertIn("Focus profile", out)
+        self.assertIn("candidate", out)
+        self.assertIn("premature-stop", out)
+
+    def test_health_counts_stop_reasons_and_empty_turns_per_message_not_per_record(self) -> None:
+        """Claude Code splits one message into per-block records that all carry the message's
+        final stop reason — counting per record would double stop_reasons and empty_turns for
+        a single message (ruling 1)."""
+        records = [fx.user("do the thing")]
+        for ts, block in (("2026-08-01T00:00:01Z", {"type": "thinking", "thinking": "hm"}),
+                          ("2026-08-01T00:00:02Z", {"type": "thinking", "thinking": "hm again"})):
+            record = fx.assistant([block], ts=ts, stop_reason="end_turn")
+            record["message"]["id"] = "msg_01"
+            records.append(record)
+        fx.write(self.home, records, name="aaaa1111.jsonl")
+        entry = next(iter(corpus.load().sessions))
+        health = query.forensics_health(entry)
+        self.assertEqual(health["stop_reasons"], {"end": 1})
+        self.assertEqual(health["empty_turns"], 1)
+
+    def test_median_latency_uses_first_record_of_each_message_only(self) -> None:
+        """Per-block gaps within one Claude Code message must not drag the median down — only
+        the first record of each msg_id group counts (ruling 2)."""
+        records = [fx.user("do the thing")]
+        pairs = [("2026-08-01T00:00:01Z", "m1"), ("2026-08-01T00:00:01.100Z", "m1"),
+                 ("2026-08-01T00:00:11Z", "m2"), ("2026-08-01T00:00:11.100Z", "m2")]
+        for ts, mid in pairs:
+            record = fx.assistant([{"type": "text", "text": "x"}], ts=ts, stop_reason="end_turn")
+            record["message"]["id"] = mid
+            records.append(record)
+        fx.write(self.home, records, name="aaaa1111.jsonl")
+        entry = next(iter(corpus.load().sessions))
+        health = query.forensics_health(entry)
+        # Naive per-record latencies are [1000, 100, 9900, 100]ms (median 550 -> 0s); only the
+        # first record of each group ([1000, 9900]) should count (median 5450 -> 5s).
+        self.assertEqual(health["median_latency_s"], 5)
+
+    def test_focus_profile_marks_referenced_dash_when_ask_has_no_refs(self) -> None:
+        """An expanded turn (one holding a drift-candidate) whose ask named no refs must print
+        '-' for referenced, not 'yes' — Run.referenced defaults True with no refs to check,
+        which would otherwise misleadingly say 'yes' (ruling 3)."""
+        records = [
+            fx.user("do the thing"),
+            fx.assistant([fx.tool_use("t1", "Bash", {"command": "ls"})],
+                        ts="2026-08-01T00:00:01Z"),
+            fx.tool_result("t1", "ok", ts="2026-08-01T00:00:01Z"),
+            fx.user("[Request interrupted by user]", ts="2026-08-01T00:00:02Z"),
+            fx.user("try something else", ts="2026-08-01T00:00:03Z"),
+        ]
+        fx.write(self.home, records, name="aaaa1111.jsonl")
+        entry = next(iter(corpus.load().sessions))
+        self.assertTrue(any(a.kind == "drift-candidate" for a in entry.anomalies))
+        rows = query.focus_profile_rows(entry)
+        expanded = [r for r in rows if r["run"] != "-"]
+        self.assertTrue(expanded)
+        self.assertTrue(all(r["referenced"] == "-" for r in expanded))
 
 
 class ShowSkillsTest(unittest.TestCase):
