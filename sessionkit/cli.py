@@ -67,6 +67,7 @@ def _scope(args: argparse.Namespace) -> query.Filter:
         state=getattr(args, "state", None) or "",
         subagents=getattr(args, "subagents", "include"),
         label_contains=getattr(args, "label_contains", None) or "",
+        finding=getattr(args, "finding", None) or "",
     )
 
 
@@ -169,15 +170,47 @@ def cmd_errors(corpus: Corpus, args: argparse.Namespace) -> str:
     report.meta(failures=total, tool_calls=calls, failure_rate=_pct(total, calls),
                 grouped_by=args.group_by)
     report.section(f"Failures by {args.group_by}")
+    reach = args.group_by in ("model", "harness")
     report.table(
-        ["bucket", "count", "share", "sessions", "fix", "exemplar"],
-        [[r["bucket"] or "-", r["n"], _pct(r["n"], total), r["sessions"],
-          classify_error(r["exemplar"])[1], r["exemplar"] or ""] for r in rows],
+        ["bucket", "count", "share", "sessions"] + (["reach"] if reach else [])
+        + ["fix", "exemplar"],
+        [[r["bucket"] or "-", r["n"], _pct(r["n"], total), r["sessions"]]
+         + ([_pct(r["sessions"], r["sessions_in_group"])] if reach else [])
+         + [classify_error(r["exemplar"])[1], r["exemplar"] or ""] for r in rows],
         key="clusters",
     )
     if args.group_by == "class" and rows:
         report.section("Reading this")
         report.text(_headline(corpus, scope, rows, total))
+    return report.render()
+
+
+def cmd_findings(corpus: Corpus, args: argparse.Namespace) -> str:
+    """Layer 2: detector findings across the fleet, as rates per kind, model, harness,
+    project or session — the input for "what does this model keep getting wrong"."""
+    scope = _scope(args)
+    rows = query.findings_rows(corpus, scope, args.group_by, args.tier or "",
+                               args.family or "", args.kind or "")
+    total = query.session_count(corpus, scope)
+    report = Report(args.json, args.budget_kb or BUDGET_AGGREGATE_KB)
+    report.meta(sessions=total, grouped_by=args.group_by)
+    report.section(f"Findings by {args.group_by}")
+    if args.group_by == "kind":
+        report.table(["kind", "tier", "family", "occurrences", "sessions", "rate"],
+                     [[r["kind"], r["tier"], r["family"], r["occurrences"],
+                       r["sessions_affected"], _pct(r["sessions_affected"], total)]
+                      for r in rows], key="findings")
+    else:
+        report.table(["group", "occurrences", "sessions_affected", "sessions_in_group", "rate"],
+                     [[r["group"], r["occurrences"], r["sessions_affected"],
+                       r["sessions_in_group"], _pct(r["sessions_affected"],
+                                                    r["sessions_in_group"])]
+                      for r in rows], key="findings")
+    if args.group_by == "model":
+        report.text("Grouped by each session's last model; a session that switched models "
+                    "counts under the final one.")
+    if any(r.get("sessions_in_group", total) < 10 for r in rows):
+        report.text("Groups with fewer than 10 sessions: their rates are not meaningful yet.")
     return report.render()
 
 
@@ -823,6 +856,8 @@ def build_parser() -> argparse.ArgumentParser:
                          help="only sessions ended today (UTC); default is the last 3 days")
     p_index.add_argument("--last", type=int, metavar="N",
                          help="only sessions ended in the last N days; default is 3")
+    p_index.add_argument("--finding", help="only sessions with this finding kind, e.g. "
+                                           "drift-candidate")
     _subagents_arg(p_index, "exclude")
 
     p_show = sub.add_parser("show", parents=[common_sub],
@@ -837,9 +872,21 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_err = sub.add_parser("errors", parents=[common_sub, scoped],
                            help="cluster tool failures fleet-wide (layer 2)")
-    p_err.add_argument("--group-by", choices=["class", "tool", "signature", "session"],
+    p_err.add_argument("--group-by",
+                       choices=["class", "tool", "signature", "session", "model", "harness"],
                        default="class")
     _subagents_arg(p_err, "exclude")
+
+    p_find = sub.add_parser("findings", parents=[common_sub, scoped],
+                            help="detector findings fleet-wide, as rates (layer 2)")
+    p_find.add_argument("--group-by", choices=["kind", "model", "harness", "project", "session"],
+                        default="kind")
+    p_find.add_argument("--tier", choices=["S", "S->J", "J"])
+    p_find.add_argument("--family", choices=["tool-protocol", "generation", "loop",
+                                             "lifecycle", "recovery", "alignment",
+                                             "environment"])
+    p_find.add_argument("--kind", help="one finding kind, e.g. degeneration")
+    _subagents_arg(p_find, "exclude")
 
     p_cmd = sub.add_parser("commands", parents=[common_sub, scoped],
                            help="review every tool call: what actually ran")
@@ -930,9 +977,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 COMMANDS = {"doctor": cmd_doctor, "index": cmd_index, "show": cmd_show, "errors": cmd_errors,
-             "commands": cmd_commands, "hooks": cmd_hooks, "forensics": cmd_forensics,
-             "children": cmd_children, "cost": cmd_cost, "tail": cmd_tail, "files": cmd_files,
-             "search": cmd_search}
+             "findings": cmd_findings, "commands": cmd_commands, "hooks": cmd_hooks,
+             "forensics": cmd_forensics, "children": cmd_children, "cost": cmd_cost,
+             "tail": cmd_tail, "files": cmd_files, "search": cmd_search}
 
 
 def main(argv: list[str] | None = None) -> int:

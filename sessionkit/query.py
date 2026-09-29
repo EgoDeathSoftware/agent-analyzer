@@ -46,7 +46,7 @@ def is_failure(tool: ToolCall) -> bool:
 @dataclass
 class Filter:
     """The shared scope flags: ``--since``/``--project``/``--source``/``--state``/
-    ``--label-contains``."""
+    ``--label-contains``/``--finding``."""
 
     cutoff: str = ""
     project: str = ""
@@ -54,6 +54,7 @@ class Filter:
     state: str = ""
     subagents: str = "include"
     label_contains: str = ""
+    finding: str = ""
 
     def matches(self, entry: Loaded) -> bool:
         """Whether a session is in scope."""
@@ -74,6 +75,8 @@ class Filter:
             label = (session.title or session.first_prompt or "").lower()
             if self.label_contains.lower() not in label:
                 return False
+        if self.finding and not any(a.kind == self.finding for a in entry.anomalies):
+            return False
         return True
 
     def apply(self, corpus: Corpus) -> list[Loaded]:
@@ -154,6 +157,8 @@ _GROUP_KEY: dict[str, Callable[[Loaded, ToolCall], str]] = {
     "tool": lambda e, t: t.name,
     "signature": lambda e, t: t.err_detail,
     "session": lambda e, t: e.session.sid,
+    "model": lambda e, t: e.session.model or "-",
+    "harness": lambda e, t: e.session.harness or "-",
 }
 
 
@@ -175,8 +180,10 @@ def clusters(corpus: Corpus, scope: Filter, group_by: str) -> list[Row]:
     ordering means two runs over an unchanged corpus cannot disagree.
     """
     key_of = _GROUP_KEY[group_by]
+    scoped = scope.apply(corpus)
+    sizes = _group_sizes(scoped, group_by)
     buckets: dict[str, dict[str, Any]] = {}
-    for entry, tool in _failures(scope.apply(corpus)):
+    for entry, tool in _failures(scoped):
         key = key_of(entry, tool)
         bucket = buckets.setdefault(key, {"bucket": key, "n": 0, "sids": set(),
                                           "names": [], "previews": []})
@@ -186,9 +193,90 @@ def clusters(corpus: Corpus, scope: Filter, group_by: str) -> list[Row]:
         bucket["previews"].append(tool.output_preview)
     out = [{"bucket": b["bucket"], "n": b["n"], "sessions": len(b["sids"]),
             "tool": min(b["names"]) if b["names"] else "",
-            "exemplar": min(b["previews"]) if b["previews"] else ""}
+            "exemplar": min(b["previews"]) if b["previews"] else "",
+            "sessions_in_group": sizes.get(b["bucket"], len(scoped))}
            for b in buckets.values()]
     out.sort(key=lambda r: (-r["n"], r["bucket"] or ""))
+    return out
+
+
+#: Per-session grouping keys shared by `sk findings` and the model/harness error groupings.
+_FINDING_GROUP: dict[str, Callable[[Loaded], str]] = {
+    "model": lambda e: e.session.model or "-",
+    "harness": lambda e: e.session.harness or "-",
+    "project": lambda e: e.project_key,
+    "session": lambda e: e.session.sid,
+}
+
+
+def _group_sizes(scoped: list[Loaded], group_by: str) -> dict[str, int]:
+    """Sessions per model or harness — the denominator a per-group rate needs."""
+    if group_by not in ("model", "harness"):
+        return {}
+    key_of = _FINDING_GROUP[group_by]
+    sizes: dict[str, int] = {}
+    for entry in scoped:
+        key = key_of(entry)
+        sizes[key] = sizes.get(key, 0) + 1
+    return sizes
+
+
+def _finding_wanted(anomaly: Any, tier: str, family: str, kind: str) -> bool:
+    known = lookup(anomaly.kind)
+    if kind and anomaly.kind != kind:
+        return False
+    if tier and (known is None or known.tier != tier):
+        return False
+    return not family or (known is not None and known.family == family)
+
+
+def findings_rows(corpus: Corpus, scope: Filter, group_by: str, tier: str = "",
+                  family: str = "", kind: str = "") -> list[Row]:
+    """Detector findings across the fleet, as rates: sessions affected out of sessions in the
+    group. Without the denominator, whichever model is used most always looks worst."""
+    entries = scope.apply(corpus)
+    if group_by == "kind":
+        return _findings_by_kind(entries, tier, family, kind)
+    key_of = _FINDING_GROUP[group_by]
+    groups: dict[str, Row] = {}
+    for entry in entries:
+        key = key_of(entry)
+        row = groups.setdefault(key, {"group": key, "occurrences": 0, "sessions_affected": 0,
+                                      "sessions_in_group": 0})
+        row["sessions_in_group"] += 1
+        hits = [a for a in entry.anomalies if _finding_wanted(a, tier, family, kind)]
+        if hits:
+            row["sessions_affected"] += 1
+            row["occurrences"] += sum(a.count for a in hits)
+    rows = list(groups.values())
+    for row in rows:
+        row["rate"] = row["sessions_affected"] / row["sessions_in_group"]
+    rows.sort(key=lambda r: (-r["rate"], -r["occurrences"], r["group"]))
+    return rows
+
+
+def _findings_by_kind(entries: list[Loaded], tier: str, family: str, kind: str) -> list[Row]:
+    rows: dict[str, Row] = {}
+    for entry in entries:
+        seen: set[str] = set()
+        for anomaly in entry.anomalies:
+            if not _finding_wanted(anomaly, tier, family, kind):
+                continue
+            known = lookup(anomaly.kind)
+            row = rows.setdefault(anomaly.kind, {
+                "kind": anomaly.kind, "tier": known.tier if known else "",
+                "family": known.family if known else "", "occurrences": 0,
+                "sessions_affected": 0})
+            row["occurrences"] += anomaly.count
+            if anomaly.kind not in seen:
+                seen.add(anomaly.kind)
+                row["sessions_affected"] += 1
+    total = len(entries)
+    out = list(rows.values())
+    for row in out:
+        row["sessions_in_group"] = total
+        row["rate"] = row["sessions_affected"] / total if total else 0.0
+    out.sort(key=lambda r: (-r["sessions_affected"], -r["occurrences"], r["kind"]))
     return out
 
 

@@ -941,5 +941,71 @@ class ShowFullTest(unittest.TestCase):
         self.assertIn(long_arg, full)
 
 
+class FindingsFleetTest(unittest.TestCase):
+    """`sk findings` and the model/harness groupings: rates, not raw counts."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        tmp = Path(self._tmp.name)
+        self.home = tmp / "claude"
+        self.home.mkdir()
+        (tmp / "empty.env").write_text("", encoding="utf-8")
+        patcher = mock.patch.dict(os.environ, {
+            "CLAUDE_DIR": str(self.home), "PI_DIR": "/nonexistent/pi",
+            "SESSIONKIT_ENV": str(tmp / "empty.env")})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        looping = [fx.user("do the thing")]
+        for i in range(3):
+            looping.append(fx.assistant([fx.tool_use(f"t{i}", "Bash", {"command": "check"})],
+                                        ts=f"2026-08-01T00:00:0{i}Z", model="claude-opus-5"))
+            looping.append(fx.tool_result(f"t{i}", "not ready", ts=f"2026-08-01T00:00:0{i}Z"))
+        fx.write(self.home, looping, name="aaaa1111.jsonl")
+        fx.write(self.home, [
+            fx.user("check it"),
+            fx.assistant([fx.tool_use("u1", "Bash", {"command": "false"})],
+                         model="claude-sonnet-5"),
+            fx.tool_result("u1", "Exit code 1", is_error=True),
+            fx.assistant([{"type": "text", "text": "ok"}], ts="2026-08-01T00:00:05Z",
+                         model="claude-sonnet-5"),
+        ], name="bbbb2222.jsonl")
+        self.loaded = corpus.load()
+
+    def _args(self, *argv: str):
+        return cli.build_parser().parse_args(list(argv))
+
+    def test_rates_by_model(self) -> None:
+        rows = {r["group"]: r for r in query.findings_rows(self.loaded, query.Filter(), "model",
+                                                           kind="repeat-tool")}
+        self.assertEqual(rows["claude-opus-5"]["rate"], 1.0)
+        self.assertEqual(rows["claude-sonnet-5"]["rate"], 0.0)
+        self.assertEqual(rows["claude-sonnet-5"]["sessions_in_group"], 1)
+
+    def test_by_kind_uses_the_whole_scope_as_denominator(self) -> None:
+        rows = {r["kind"]: r for r in query.findings_rows(self.loaded, query.Filter(), "kind")}
+        self.assertEqual(rows["repeat-tool"]["sessions_affected"], 1)
+        self.assertEqual(rows["repeat-tool"]["sessions_in_group"], 2)
+        self.assertEqual(rows["repeat-tool"]["tier"], "S")
+
+    def test_index_filter_by_finding(self) -> None:
+        rows = query.index_rows(self.loaded, query.Filter(finding="repeat-tool"))
+        self.assertEqual([r["sid"] for r in rows],
+                         [e.session.sid for e in self.loaded.sessions
+                          if any(a.kind == "repeat-tool" for a in e.anomalies)])
+        self.assertEqual(len(rows), 1)
+
+    def test_cli_findings_report(self) -> None:
+        out = cli.cmd_findings(self.loaded, self._args("findings", "--group-by", "model"))
+        self.assertIn("claude-opus-5", out)
+        self.assertIn("rate", out)
+
+    def test_cli_errors_by_harness_shows_reach(self) -> None:
+        out = cli.cmd_errors(self.loaded, self._args("errors", "--group-by", "harness"))
+        self.assertIn("claude-code", out)
+        self.assertIn("reach", out)
+        self.assertIn("50.0%", out)
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
