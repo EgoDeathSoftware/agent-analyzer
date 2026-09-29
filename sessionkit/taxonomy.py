@@ -93,7 +93,8 @@ ERROR_CLASSES: tuple[FailureClass, ...] = (
            r"permission for this action was denied|"
            r"permission to use \w+.{0,200}?has been denied|"
            r"File is in a directory that is denied by your permission|"
-           r"This session is isolated in the worktree|Tool execution was blocked",
+           r"This session is isolated in the worktree|Tool execution was blocked|"
+           r"Denied by deny-list:",
            flags=re.I | re.S),
     _error("tool-error-structured", "environment", "env",
            'A tool returned a structured failure ({"ok": false}) — read its errors list; the '
