@@ -5,6 +5,7 @@ from __future__ import annotations
 import unittest
 
 from sessionkit.detectors import detect
+from sessionkit.taxonomy import THRESHOLDS
 from tests import detector_fixtures as df
 
 
@@ -36,10 +37,21 @@ class EditMismatchSpiralTest(unittest.TestCase):
 
 
 class ReadOnlySpiralTest(unittest.TestCase):
-    def test_long_run_of_reads_and_searches(self) -> None:
+    LIMIT = int(THRESHOLDS["read_only_spiral"])
+
+    def _run(self, count: int):
         tools = [df.call(i, "read" if i % 2 else "grep", {"path": f"/{i}.py"})
-                 for i in range(1, 9)]
-        self.assertIn("read-only-spiral", _kinds(df.session(tools=tools)))
+                 for i in range(1, count + 1)]
+        return _kinds(df.session(tools=tools))
+
+    def test_long_run_of_reads_and_searches(self) -> None:
+        self.assertIn("read-only-spiral", self._run(self.LIMIT))
+
+    def test_one_call_short_of_the_threshold_is_exploration(self) -> None:
+        self.assertNotIn("read-only-spiral", self._run(self.LIMIT - 1))
+
+    def test_threshold_is_twelve(self) -> None:
+        self.assertEqual(self.LIMIT, 12)
 
     def test_an_edit_breaks_the_run(self) -> None:
         tools = [df.call(i, "read", {"path": f"/{i}.py"}) for i in range(1, 5)]
@@ -61,10 +73,19 @@ class FileThrashTest(unittest.TestCase):
         files = [df.FileOp("/a.py", "edit", "", f"e{i}", line=i) for i in range(1, 6)]
         self.assertIn("file-thrash", _kinds(df.session(tools=tools, files=files)))
 
-    def test_seven_clean_edits_are_iterative_work(self) -> None:
-        tools = [df.call(i, "edit", tid=f"e{i}") for i in range(1, 8)]
-        files = [df.FileOp("/a.py", "edit", "", f"e{i}", line=i) for i in range(1, 8)]
-        self.assertNotIn("file-thrash", _kinds(df.session(tools=tools, files=files)))
+    def _clean_edits(self, count: int) -> list[str]:
+        tools = [df.call(i, "edit", tid=f"e{i}") for i in range(1, count + 1)]
+        files = [df.FileOp("/a.py", "edit", "", f"e{i}", line=i) for i in range(1, count + 1)]
+        return _kinds(df.session(tools=tools, files=files))
+
+    def test_clean_edits_below_the_threshold_are_iterative_work(self) -> None:
+        self.assertNotIn("file-thrash", self._clean_edits(int(THRESHOLDS["file_thrash"]) - 1))
+
+    def test_clean_edits_at_the_threshold_thrash(self) -> None:
+        self.assertIn("file-thrash", self._clean_edits(int(THRESHOLDS["file_thrash"])))
+
+    def test_threshold_is_twelve(self) -> None:
+        self.assertEqual(THRESHOLDS["file_thrash"], 12)
 
 
 class ReadLoopTest(unittest.TestCase):

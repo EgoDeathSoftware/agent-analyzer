@@ -23,13 +23,13 @@ TIER_J = "J"
 #: All tuneable detector limits in one place rather than scattered as literals.
 THRESHOLDS: dict[str, float] = {
     "repeat_tool": 3,       # identical (tool, input) calls in one session
-    "file_thrash": 8,       # edits to the same path
+    "file_thrash": 12,     # edits to the same path
     "file_thrash_min": 5,   # ... or this many edits to one path
     "file_thrash_failures": 2,  # ... when at least this many of them failed
     "read_loop": 5,         # reads of the same path
     "error_cascade": 3,     # consecutive failing tool calls
     "edit_mismatch_spiral": 3,  # edit-mismatch failures on one path
-    "read_only_spiral": 8,  # consecutive read/search calls
+    "read_only_spiral": 12,  # consecutive read/search calls
     "read_only_text_chars": 200,  # an assistant answer at least this long breaks the run
     "hook_pingpong": 2,     # hook blocks against the same tool
     "compaction_churn": 2,  # compaction events

@@ -11,7 +11,7 @@ import unittest
 from sessionkit.classify import annotate_errors, derive_end_state
 from sessionkit.detectors import detect
 from sessionkit.parse import FileOp, ParsedSession, SysEvent, ToolCall
-from sessionkit.taxonomy import classify_error, signature
+from sessionkit.taxonomy import THRESHOLDS, classify_error, signature
 
 
 def _session(**kw) -> ParsedSession:
@@ -216,13 +216,14 @@ class DetectorTest(unittest.TestCase):
 
     def test_file_thrash(self) -> None:
         session = _session()
-        session.files.extend(FileOp("/a.py", "edit", "", "t", line=i) for i in range(1, 9))
+        limit = int(THRESHOLDS["file_thrash"])
+        session.files.extend(FileOp("/a.py", "edit", "", "t", line=i) for i in range(1, limit + 1))
         anomaly = next(a for a in detect(session) if a.kind == "file-thrash")
-        self.assertEqual(anomaly.lines, [1, 2, 3, 4, 5, 6, 7, 8])
+        self.assertEqual(anomaly.lines, list(range(1, limit + 1)))
 
     def test_file_thrash_negative(self) -> None:
         session = _session()
-        session.files.extend(FileOp(f"/{i}.py", "edit", "", "t", line=i) for i in range(9))
+        session.files.extend(FileOp(f"/{i}.py", "edit", "", "t", line=i) for i in range(30))
         self.assertNotIn("file-thrash", _kinds(session))
 
     def test_read_loop(self) -> None:
