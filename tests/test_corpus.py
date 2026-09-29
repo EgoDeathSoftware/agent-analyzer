@@ -1111,6 +1111,42 @@ class FindingsFleetTest(unittest.TestCase):
         self.assertIn("reach", out)
         self.assertIn("50.0%", out)
 
+    def test_cli_errors_by_model_drops_fix_and_exemplar_adds_sessions_in_group(self) -> None:
+        out = cli.cmd_errors(self.loaded, self._args("errors", "--group-by", "model"))
+        self.assertIn("sessions_in_group", out)
+        self.assertNotIn("exemplar", out)
+
+    def test_cli_index_finding_ignores_default_since_window(self) -> None:
+        """The fixture sessions are dated 2026-08-01, well outside index's default 3-day
+        window; --finding alone must search the whole corpus, not that window (ruling 4)."""
+        looping = next(e for e in self.loaded.sessions
+                       if any(a.kind == "repeat-tool" for a in e.anomalies))
+        out = cli.cmd_index(self.loaded, self._args("index", "--finding", "repeat-tool"))
+        self.assertIn(looping.session.sid[:8], out)
+
+    def test_cli_findings_by_session_skips_fewer_than_ten_note(self) -> None:
+        """Every session grouping has exactly one session per group, so the note would fire
+        unconditionally and say nothing useful (ruling 6)."""
+        out = cli.cmd_findings(self.loaded, self._args("findings", "--group-by", "session"))
+        self.assertNotIn("fewer than 10 sessions", out)
+
+    def test_unknown_finding_kind_counts_as_tier_s_consistently(self) -> None:
+        """A finding kind absent from the taxonomy must count as tier S in both the by-kind
+        view and the tier filter — not tier '' in one and dropped by any --tier filter in the
+        other (ruling 7)."""
+        from sessionkit.detectors.base import Anomaly
+        entry = self.loaded.sessions[0]
+        entry.anomalies.append(Anomaly("totally-unknown-kind", "unrecognised", 1, [1]))
+        by_kind = {r["kind"]: r for r in query.findings_rows(self.loaded, query.Filter(), "kind")}
+        self.assertEqual(by_kind["totally-unknown-kind"]["tier"], "S")
+        self.assertEqual(by_kind["totally-unknown-kind"]["family"], "")
+        tier_s = {r["kind"] for r in query.findings_rows(self.loaded, query.Filter(), "kind",
+                                                         tier="S")}
+        self.assertIn("totally-unknown-kind", tier_s)
+        tier_j = {r["kind"] for r in query.findings_rows(self.loaded, query.Filter(), "kind",
+                                                         tier="J")}
+        self.assertNotIn("totally-unknown-kind", tier_j)
+
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

@@ -225,7 +225,7 @@ def _finding_wanted(anomaly: Any, tier: str, family: str, kind: str) -> bool:
     known = lookup(anomaly.kind)
     if kind and anomaly.kind != kind:
         return False
-    if tier and (known is None or known.tier != tier):
+    if tier and (known.tier if known else TIER_S) != tier:
         return False
     return not family or (known is not None and known.family == family)
 
@@ -264,7 +264,7 @@ def _findings_by_kind(entries: list[Loaded], tier: str, family: str, kind: str) 
                 continue
             known = lookup(anomaly.kind)
             row = rows.setdefault(anomaly.kind, {
-                "kind": anomaly.kind, "tier": known.tier if known else "",
+                "kind": anomaly.kind, "tier": known.tier if known else TIER_S,
                 "family": known.family if known else "", "occurrences": 0,
                 "sessions_affected": 0})
             row["occurrences"] += anomaly.count

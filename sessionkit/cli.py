@@ -116,7 +116,10 @@ def _index_cutoff(args: argparse.Namespace) -> str:
 
     Layer 1 is meant for "what have I been doing", so it defaults to the last 3 days rather
     than the whole corpus. ``--today``/``--last`` narrow or widen that window; an explicit
-    ``--since`` (shared with every other query command) still wins outright.
+    ``--since`` (shared with every other query command) still wins outright. ``--finding``
+    changes the question to "which sessions ever had this finding", so when it is given alone
+    — none of ``--since``/``--today``/``--last`` — the default 3-day window is dropped in
+    favour of the whole corpus; a finding's sessions are routinely older than 3 days.
     """
     since, today, last = args.since, args.today, args.last
     if sum(bool(x) for x in (since, today, last is not None)) > 1:
@@ -129,6 +132,8 @@ def _index_cutoff(args: argparse.Namespace) -> str:
         if last < 1:
             raise SystemExit(f"--last must be a positive integer, got {last}")
         return f"{last}d"
+    if getattr(args, "finding", None):
+        return ""
     return "3d"
 
 
@@ -171,12 +176,15 @@ def cmd_errors(corpus: Corpus, args: argparse.Namespace) -> str:
                 grouped_by=args.group_by)
     report.section(f"Failures by {args.group_by}")
     reach = args.group_by in ("model", "harness")
+    # model/harness rows drop fix/exemplar: an exemplar there is an arbitrary preview across
+    # mixed error classes, not a fix for the row it's shown on. sessions_in_group replaces it
+    # with the rate's own denominator, next to reach.
+    extra_headers = ["reach", "sessions_in_group"] if reach else ["fix", "exemplar"]
     report.table(
-        ["bucket", "count", "share", "sessions"] + (["reach"] if reach else [])
-        + ["fix", "exemplar"],
+        ["bucket", "count", "share", "sessions"] + extra_headers,
         [[r["bucket"] or "-", r["n"], _pct(r["n"], total), r["sessions"]]
-         + ([_pct(r["sessions"], r["sessions_in_group"])] if reach else [])
-         + [classify_error(r["exemplar"])[1], r["exemplar"] or ""] for r in rows],
+         + ([_pct(r["sessions"], r["sessions_in_group"]), r["sessions_in_group"]] if reach
+            else [classify_error(r["exemplar"])[1], r["exemplar"] or ""]) for r in rows],
         key="clusters",
     )
     if args.group_by == "class" and rows:
@@ -209,7 +217,9 @@ def cmd_findings(corpus: Corpus, args: argparse.Namespace) -> str:
     if args.group_by == "model":
         report.text("Grouped by each session's last model; a session that switched models "
                     "counts under the final one.")
-    if any(r.get("sessions_in_group", total) < 10 for r in rows):
+    # Every session grouping has exactly one session per group by construction, so the note
+    # would fire unconditionally there and say nothing useful.
+    if args.group_by != "session" and any(r.get("sessions_in_group", total) < 10 for r in rows):
         report.text("Groups with fewer than 10 sessions: their rates are not meaningful yet.")
     return report.render()
 
