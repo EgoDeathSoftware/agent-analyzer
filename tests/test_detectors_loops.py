@@ -53,16 +53,23 @@ class ReadOnlySpiralTest(unittest.TestCase):
     def test_threshold_is_twelve(self) -> None:
         self.assertEqual(self.LIMIT, 12)
 
+    def _reads(self, first: int, count: int) -> list:
+        return [df.call(i, "read", {"path": f"/{i}.py"}) for i in range(first, first + count)]
+
+    def test_two_short_runs_without_a_break_add_up(self) -> None:
+        tools = self._reads(1, 2 * (self.LIMIT - 1))
+        self.assertIn("read-only-spiral", _kinds(df.session(tools=tools)))
+
     def test_an_edit_breaks_the_run(self) -> None:
-        tools = [df.call(i, "read", {"path": f"/{i}.py"}) for i in range(1, 5)]
-        tools.append(df.call(5, "edit", {"path": "/1.py"}))
-        tools += [df.call(i, "read", {"path": f"/{i}.py"}) for i in range(6, 10)]
+        run = self.LIMIT - 1
+        tools = self._reads(1, run) + [df.call(run + 1, "edit", {"path": "/1.py"})]
+        tools += self._reads(run + 2, run)
         self.assertNotIn("read-only-spiral", _kinds(df.session(tools=tools)))
 
     def test_a_substantial_answer_breaks_the_run(self) -> None:
-        tools = [df.call(i, "read", {"path": f"/{i}.py"}) for i in range(1, 5)]
-        tools += [df.call(i, "read", {"path": f"/{i}.py"}) for i in range(6, 10)]
-        messages = [df.msg(5, text="x" * 250, stop="tool_use", tool_calls=1)]
+        run = self.LIMIT - 1
+        tools = self._reads(1, run) + self._reads(run + 2, run)
+        messages = [df.msg(run + 1, text="x" * 250, stop="tool_use", tool_calls=1)]
         self.assertNotIn("read-only-spiral",
                          _kinds(df.session(tools=tools, messages=messages)))
 
