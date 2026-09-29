@@ -44,7 +44,7 @@ Use the id or prefix the user gave. Otherwise, find candidates:
 
 ```bash
 $SK index --finding degeneration          # sessions with a given finding
-$SK index --state agent-unresponsive      # or aborted, error-cascade, interrupted-tool, ...
+$SK index --state agent-unresponsive --since 30d   # or aborted, error-cascade, interrupted-tool, ...
 $SK index --source pi --since 7d          # pi sessions only
 ```
 
@@ -56,10 +56,10 @@ the child too.
 ### 2. Run the report
 
 ```bash
-$SK forensics <sid> --json
+$SK forensics <sid> --json --budget-kb 24
 ```
 
-- **Meta:** `harness`, `model`, `state` and the end reason. `agent-unresponsive` means the
+- **Meta:** `harness`, `model` and `state`. `agent-unresponsive` means the
   agent stopped answering; the user didn't walk away.
 - **`findings`:** `tier`, `family`, `kind`, `detail`, `count`, `lines`, `fix_target`, `hint`.
 - **`focus`:** per user turn, where the effort went. Turns holding a drift candidate are
@@ -67,6 +67,8 @@ $SK forensics <sid> --json
 - **`timeline`:** only the lines the findings cite.
 - **`health`:** tool success, stop reasons, empty turns, the reasoning/visible ratio,
   compactions and median turn latency.
+- **`omitted`** counts rows dropped per table — if any is non-zero, raise `--budget-kb`.
+- **`notes`** carries the end reason and the candidate reminder.
 
 ### 3. Triage by tier
 
@@ -141,8 +143,10 @@ Health: <success rate, stop reasons, median latency>
 
 - **Read-only.** Propose changes; never apply them.
 - **A clean session is a valid result.** Don't manufacture a finding.
-- **Never claim coverage you don't have.** If a table ends with `… N more row(s) omitted`, say
-  so or raise `--budget-kb`.
+- **Never claim coverage you don't have.** If a text table ends with `… N more row(s) omitted`, or
+  the JSON `omitted` dict is non-zero, say so or raise `--budget-kb`.
 - **A live session's unfinished tail is expected.** `hung` and `abrupt-truncation` are
   suppressed for live sessions; don't re-derive them by hand.
+- **pi sessions can't be detected as live.** Discount `hung` and `abrupt-truncation` on a pi
+  session that may still be running.
 - **Name small samples.** Example: "pi: 4 sessions — rates not meaningful".
