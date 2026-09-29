@@ -23,7 +23,7 @@ tests and commands.
 | 2 | [`2026-09-27-agent-postmortem-02-parsers.md`](2026-09-27-agent-postmortem-02-parsers.md) | 3, 4, 5, 6 | Parse-time features and new `Message`/`ParsedSession` fields in both parsers; the pi and Claude Code parser bugs are fixed; pi-subagents async runs are loaded and linked. | done |
 | 3 | [`2026-09-27-agent-postmortem-03-detectors-core.md`](2026-09-27-agent-postmortem-03-detectors-core.md) | 7, 8, 9, 10 | The new and widened error classes; the tool-protocol, generation, loop and lifecycle detectors; the new end states; liveness passed into the detectors. | done |
 | 4 | [`2026-09-27-agent-postmortem-04-detectors-judgment.md`](2026-09-27-agent-postmortem-04-detectors-judgment.md) | 11, 12, 13 | The recovery and alignment candidates, the focus profile, drift candidates, resource interference, and the registry completeness tests. | done |
-| 5 | [`2026-09-27-agent-postmortem-05-cli.md`](2026-09-27-agent-postmortem-05-cli.md) | 14, 15 | `sk forensics` as the post-mortem report; `sk findings` with rates; `errors --group-by model\|harness`; `index --finding`. | todo |
+| 5 | [`2026-09-27-agent-postmortem-05-cli.md`](2026-09-27-agent-postmortem-05-cli.md) | 14, 15 | `sk forensics` as the post-mortem report; `sk findings` with rates; `errors --group-by model\|harness`; `index --finding`. | done |
 | 6 | [`2026-09-27-agent-postmortem-06-skills-validation.md`](2026-09-27-agent-postmortem-06-skills-validation.md) | 16, 17, 18 | The failure-class knowledge base, the post-mortem and fleet skills, the README, corpus acceptance, the dry-run regression and real pi sessions. | todo |
 
 ## Tasks
@@ -41,8 +41,8 @@ tests and commands.
 - [x] **T11** (CP4) Recovery and alignment candidates — commit: `2e0556e`
 - [x] **T12** (CP4) Focus profile and drift candidates — commit: `d92f246`
 - [x] **T13** (CP4) Cross-session resource interference, and registry completeness — commit: `0d7d5bb`
-- [ ] **T14** (CP5) `sk forensics` becomes the post-mortem report — commit: `—`
-- [ ] **T15** (CP5) `sk findings` fleet view, `errors --group-by model|harness`, and `index --finding` — commit: `—`
+- [x] **T14** (CP5) `sk forensics` becomes the post-mortem report — commit: `fc21d6d`
+- [x] **T15** (CP5) `sk findings` fleet view, `errors --group-by model|harness`, and `index --finding` — commit: `fe4ff75`
 - [ ] **T16** (CP6) The failure-class knowledge base and parity tests — commit: `—`
 - [ ] **T17** (CP6) The post-mortem skill, the fleet skill, and the README — commit: `—`
 - [ ] **T18** (CP6) Validation — corpus acceptance, dry-run regression, real pi sessions — commit: `—`
@@ -186,3 +186,23 @@ tests and commands.
   detector is in `DETECTORS`; 42 Claude Code sessions end on injected user records (`/exit`
   stdout) and read as `interrupted-user` because `_user_end` keys on role, not `is_prompt`,
   hiding them from the tail detectors.
+- 2026-09-28 — CP5 done (commits fc21d6d, fe4ff75, 72c80f2, plus final-review fix wave 6ec6b4f,
+  7ee583a). Suite: 494/494. Rulings that amend the plan: `forensics_health` counts stop reasons
+  and empty turns per whole model message (`assistant_turns`), and `median_latency_s` uses only
+  the first record of each `msg_id`; `reasoning_ratio` is `None` when the session recorded no
+  reasoning text (current Claude Code redacts thinking, so 0 was misleading on ~88% of
+  sessions); the report renders Health right after Findings and the focus profile drops 0-call
+  turns (Health was cut by the 8 KB budget on 82/699 real sessions); `referenced` prints `-` when
+  the ask named no refs or the run touched no paths; `index --finding` ignores index's default
+  3-day window; `errors --group-by model|harness` shows `reach` and `sessions_in_group` instead
+  of `fix`/`exemplar`; the small-sample note is skipped for `findings --group-by session`;
+  unknown finding kinds count as tier `S` in every view.
+- 2026-09-28 — For CP6: `skills/session-forensics/SKILL.md` still says the report reads
+  Findings, Timeline, Health; it is now Findings, Health, Focus profile, Timeline (T17). 3/700
+  real sessions still lose Health in `--json` because their Findings table alone exceeds 8 KB;
+  smallest fix is an unbudgeted fixed-size table in `Report` for Health. The spec's focus
+  profile shows the ask's refs on expanded turns, and says `findings --group-by model` makes
+  latency comparable across models; neither is built. `render.OMIT_HINT` suggests `--since` on
+  single-session output. `_GROUP_KEY` and `_FINDING_GROUP` duplicate the model/harness keys, and
+  `cmd_findings` applies the scope twice. Deferred from CP3 still: pi has no liveness registry
+  (recent-mtime heuristic), and `sk show` skips the cross-session pass.
