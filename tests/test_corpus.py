@@ -988,6 +988,30 @@ class FindingsFleetTest(unittest.TestCase):
         self.assertEqual(rows["repeat-tool"]["sessions_in_group"], 2)
         self.assertEqual(rows["repeat-tool"]["tier"], "S")
 
+    def test_tier_filter_keeps_matching_kind_and_excludes_others(self) -> None:
+        kept = {r["kind"]: r for r in query.findings_rows(self.loaded, query.Filter(), "kind",
+                                                          tier="S")}
+        self.assertIn("repeat-tool", kept)
+        excluded = {r["kind"]: r for r in query.findings_rows(self.loaded, query.Filter(), "kind",
+                                                              tier="J")}
+        self.assertNotIn("repeat-tool", excluded)
+
+    def test_family_filter_keeps_matching_kind_and_excludes_others(self) -> None:
+        kept = {r["kind"]: r for r in query.findings_rows(self.loaded, query.Filter(), "kind",
+                                                          family="loop")}
+        self.assertIn("repeat-tool", kept)
+        excluded = {r["kind"]: r for r in query.findings_rows(self.loaded, query.Filter(), "kind",
+                                                              family="generation")}
+        self.assertNotIn("repeat-tool", excluded)
+
+    def test_tier_and_family_filter_non_kind_grouping(self) -> None:
+        rows = {r["group"]: r for r in query.findings_rows(self.loaded, query.Filter(), "model",
+                                                           tier="S", family="loop")}
+        self.assertEqual(rows["claude-opus-5"]["sessions_affected"], 1)
+        excluded = {r["group"]: r for r in query.findings_rows(self.loaded, query.Filter(),
+                                                               "model", tier="J")}
+        self.assertEqual(excluded["claude-opus-5"]["sessions_affected"], 0)
+
     def test_index_filter_by_finding(self) -> None:
         rows = query.index_rows(self.loaded, query.Filter(finding="repeat-tool"))
         self.assertEqual([r["sid"] for r in rows],
