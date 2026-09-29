@@ -291,6 +291,33 @@ The conclusion held; the arithmetic behind it did not. This is the same class of
 top-level-only glob that silently dropped 41% of the corpus, and it is the reason `PLAN.md` argues
 the parser has to be shared and tested rather than improvised per skill.
 
+### 2026-09-29 — agent post-mortem built (checkpoints 1–6)
+
+`sk forensics` became a tiered post-mortem and `sk findings` a fleet view, for Claude Code and
+pi (design: `docs/superpowers/specs/2026-09-27-agent-postmortem-design.md`).
+
+- `classify.py` no longer holds everything. `taxonomy.py` is the single failure table (family,
+  tier `S` / `S->J` / `J`, fix target) with every threshold in `THRESHOLDS`; `harness.py` maps
+  tool roles per harness; `detectors/` has one module per family group. `classify.py` keeps end
+  states and tail signals.
+- New end states: `aborted`, `output-truncated`, `agent-unresponsive`. `compacted-idle` is keyed
+  on message position, not sysevent count, after a review found pi sessions misread.
+- pi-subagents async runs load and link to their parent session.
+- Claude Code writes one record per content block and repeats the final `stop_reason` on all of
+  them; per-turn measures group by `msg_id`. Without that, `empty-turn` was ~98% false.
+- Tuned on the real corpus (1,276 to 1,280 sessions): stall 15.1% to 8.5%, read-only-spiral
+  10.3% to 4.8%, file-thrash real-failure 9/55 to 5/14 (still not a majority; threshold 12
+  chosen knowingly), pi bash classification 23/27 to 27/27. Read-only-spiral and file-thrash
+  thresholds went 8 to 12; stall limits are 300 s non-exec and 1200 s exec without a declared
+  timeout, with Claude Code approval waits excluded; pi `Denied by deny-list:` is
+  `policy-denied`.
+- `skills/session-forensics/reference/failure-classes.md` and `tests/test_parity.py` keep docs
+  and code aligned. Suite: 503 tests.
+- Deferred: a pi liveness heuristic (a pi session killed between turns reads `complete`);
+  `sk show` skips the cross-session pass, so `resource-interference` appears only in
+  `sk forensics`; Claude Code Bash with no declared timeout has a 120 s default, so long
+  no-timeout Bash is likely approval wait.
+
 ---
 
 ## 4. Superseded reasoning
