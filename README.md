@@ -155,7 +155,7 @@ one, change the other. `sk doctor` reports unpriced models instead of silently d
 **Two transcript layouts.** Top-level sessions live at `projects/<project>/<session>.jsonl`;
 subagent transcripts live one level deeper at
 `projects/<project>/<parent-session>/subagents/agent-*.jsonl` and carry the **parent's**
-`sessionId` — they are keyed by `agentId` instead. subagents are a large share
+`sessionId` — they are keyed by `agentId` instead. Subagents are a large share
 of the files, so missing either fact loses a large part of the data.
 
 **Safety.** Strictly read-only: `sk` writes nothing but its own stdout. Every preview passes
