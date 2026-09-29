@@ -92,7 +92,7 @@ ln -sfn /mnt/c/Users/david/Projects/CAT_AI/claude-session-analyzer/skills/error-
 PYTHONPATH=. python3 -m unittest discover -s tests -t .
 ```
 
-96 tests, no dependencies. Fixtures are built inline so each test shows the exact transcript
+503 tests, no dependencies. Fixtures are built inline so each test shows the exact transcript
 shape it asserts against. Every anomaly detector has a positive *and* a negative case — a
 detector that can never return false is not tested.
 
