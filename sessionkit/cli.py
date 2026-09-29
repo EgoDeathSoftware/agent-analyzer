@@ -303,6 +303,10 @@ def cmd_forensics(corpus: Corpus, args: argparse.Namespace) -> str:
     if any(f["tier"] == TIER_CANDIDATE for f in findings):
         report.text("Rows marked `candidate` are hypotheses: confirm or dismiss each against "
                     "its cited lines before reporting it.")
+    # Health renders right after Findings, not last: on a long session, Focus profile and
+    # Timeline can exhaust the budget on their own, and Health must not be the section that
+    # silently disappears when that happens.
+    _forensics_health_section(report, query.forensics_health(entry))
     report.section("Focus profile")
     report.table(
         ["turn", "ask", "run", "calls", "share", "referenced"],
@@ -317,7 +321,6 @@ def cmd_forensics(corpus: Corpus, args: argparse.Namespace) -> str:
          for r in query.forensics_timeline(entry)],
         key="timeline",
     )
-    _forensics_health_section(report, query.forensics_health(entry))
     return report.render()
 
 
@@ -333,7 +336,7 @@ def _forensics_health_section(report: Report, health: query.Row) -> None:
          ["failed", health["failed"]],
          ["success rate", _pct(health["succeeded"], health["tool_calls"])],
          ["stop reasons", stops], ["empty turns", health["empty_turns"]],
-         ["reasoning/visible", "-" if ratio is None else ratio],
+         ["reasoning/visible", "-" if ratio is None else f"{ratio:.2f}"],
          ["compactions", health["compactions"]],
          ["median turn latency", "-" if latency is None else f"{latency}s"]],
         key="health",

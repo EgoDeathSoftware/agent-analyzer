@@ -614,6 +614,87 @@ class ForensicsTest(unittest.TestCase):
         self.assertTrue(expanded)
         self.assertTrue(all(r["referenced"] == "-" for r in expanded))
 
+    def test_focus_profile_drops_zero_call_turns(self) -> None:
+        """Real sessions have many user turns with no tool calls (plain chat); they must not
+        print as an all-zero summary row (ruling 1)."""
+        records = [
+            fx.user("first ask"),
+            fx.assistant([fx.tool_use("t1", "Bash", {"command": "ls"})],
+                        ts="2026-08-01T00:00:01Z"),
+            fx.tool_result("t1", "ok", ts="2026-08-01T00:00:01Z"),
+            fx.user("just chatting", ts="2026-08-01T00:00:02Z"),
+            fx.assistant([{"type": "text", "text": "sure"}], ts="2026-08-01T00:00:03Z"),
+        ]
+        fx.write(self.home, records, name="aaaa1111.jsonl")
+        entry = next(iter(corpus.load().sessions))
+        rows = query.focus_profile_rows(entry)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["calls"], 1)
+
+    def test_health_not_omitted_from_json_on_a_long_session(self) -> None:
+        """Health used to render last, after Findings/Focus/Timeline could exhaust the budget
+        on a long session; it now renders right after Findings and must never be the section
+        that silently disappears (ruling 1)."""
+        records: list[dict] = []
+        for i in range(300):
+            minute, second = divmod(i, 60)
+            ts = f"2026-08-01T00:{minute:02d}:{second:02d}Z"
+            records.append(fx.user(f"turn {i}", ts=ts))
+            records.append(fx.assistant(
+                [fx.tool_use(f"t{i}", "Bash", {"command": f"cmd{i}"})], ts=ts))
+            records.append(fx.tool_result(f"t{i}", "ok", ts=ts))
+        fx.write(self.home, records, name="aaaa1111.jsonl")
+        loaded = corpus.load()
+        sid = loaded.sessions[0].session.sid
+        out = cli.cmd_forensics(loaded, self._args("forensics", "--json", sid))
+        doc = json.loads(out)
+        self.assertNotIn("health", doc.get("omitted", {}))
+
+    def test_reasoning_ratio_is_none_when_no_reasoning_recorded(self) -> None:
+        """Current Claude Code redacts thinking text, so reasoning_len is 0 for most sessions;
+        a ratio of 0 would misleadingly suggest no reasoning happened rather than that it
+        cannot be told apart from redacted (ruling 2)."""
+        self._write_looping_session()
+        health = query.forensics_health(next(iter(corpus.load().sessions)))
+        self.assertIsNone(health["reasoning_ratio"])
+
+    def test_health_table_formats_reasoning_ratio_with_two_decimals(self) -> None:
+        records = [
+            fx.user("do it"),
+            fx.assistant([{"type": "thinking", "thinking": "x" * 10},
+                         {"type": "text", "text": "y" * 30}],
+                        ts="2026-08-01T00:00:01Z", stop_reason="end_turn"),
+        ]
+        fx.write(self.home, records, name="aaaa1111.jsonl")
+        loaded = corpus.load()
+        sid = loaded.sessions[0].session.sid
+        health = query.forensics_health(loaded.sessions[0])
+        self.assertEqual(health["reasoning_ratio"], 0.33)
+        out = cli.cmd_forensics(loaded, self._args("forensics", sid))
+        self.assertIn("0.33", out)
+        self.assertNotIn("0.3300", out)
+
+    def test_focus_profile_prints_dash_for_a_referenced_run_with_no_paths(self) -> None:
+        """A referenced ask with a same-turn run that touches no paths at all (e.g. a bare
+        exec command) must print '-', not 'yes' — Run.referenced defaults True when there is
+        nothing to check it against (ruling 3)."""
+        records = [fx.user("check notes.md")]
+        for i in range(8):
+            ts = f"2026-08-01T00:00:{i:02d}Z"
+            records.append(fx.assistant(
+                [fx.tool_use(f"r{i}", "Read",
+                             {"file_path": f"/home/dev/myproject/other/f{i}.py"})], ts=ts))
+            records.append(fx.tool_result(f"r{i}", "content", ts=ts))
+        records.append(fx.assistant([fx.tool_use("b1", "Bash", {"command": "date"})],
+                                    ts="2026-08-01T00:00:08Z"))
+        records.append(fx.tool_result("b1", "Tue", ts="2026-08-01T00:00:08Z"))
+        fx.write(self.home, records, name="aaaa1111.jsonl")
+        entry = next(iter(corpus.load().sessions))
+        self.assertTrue(any(a.kind == "drift-candidate" for a in entry.anomalies))
+        rows = query.focus_profile_rows(entry)
+        bash_row = next(r for r in rows if r["run"] == "exec:date")
+        self.assertEqual(bash_row["referenced"], "-")
+
 
 class ShowSkillsTest(unittest.TestCase):
     """query.skill_rows and the Skills section of `sk show --mode summary`."""

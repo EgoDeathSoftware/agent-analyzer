@@ -883,7 +883,11 @@ def forensics_health(entry: Loaded) -> Row:
         "tool_calls": len(tools), "failed": failed, "succeeded": len(tools) - failed,
         "stop_reasons": stops,
         "empty_turns": empty_turns,
-        "reasoning_ratio": round(reasoning / visible, 2) if visible else None,
+        # Current Claude Code redacts thinking text, so most sessions have reasoning_len == 0
+        # for reasons unrelated to whether the model reasoned — a redacted block is
+        # indistinguishable from an absent one without a parser field for it, so the ratio is
+        # reported as unknown (None, shown "-") rather than a misleading 0.
+        "reasoning_ratio": round(reasoning / visible, 2) if reasoning and visible else None,
         "compactions": sum(1 for e in session.sysev if e.subtype == "compaction"),
         "median_latency_s": int(statistics.median(latencies) // 1000) if latencies else None,
     }
@@ -893,20 +897,27 @@ def focus_profile_rows(entry: Loaded) -> list[Row]:
     """Per user turn, where the effort went. A turn holding a drift candidate is expanded
     into its runs; every other turn is one summary row, so long sessions stay in budget.
 
-    A run's ``referenced`` is printed ``-`` rather than yes/no when the ask named no refs at
-    all: :class:`~sessionkit.detectors.alignment.Run` defaults ``referenced`` to ``True`` when
-    there is nothing to check it against, which would otherwise misleadingly read ``yes``.
+    A user turn with no tool calls at all (a plain chat reply) is dropped from the summary
+    rows entirely rather than printed as an all-zero row — real sessions have many of these,
+    and they add nothing to a report about where effort went.
+
+    A run's ``referenced`` is printed ``-`` rather than yes/no when there is nothing to check
+    it against: the ask named no refs at all, or the run itself touched no paths (e.g. a bare
+    exec command) — :class:`~sessionkit.detectors.alignment.Run` defaults ``referenced`` to
+    ``True`` in both cases, which would otherwise misleadingly read ``yes``.
     """
     flagged = {line for a in entry.anomalies if a.kind == "drift-candidate" for line in a.lines}
     rows: list[Row] = []
     for turn in focus_profile(entry.session):
         expanded = turn.calls and any(flagged.intersection(r.lines) for r in turn.runs)
         if not expanded:
+            if not turn.calls:
+                continue
             rows.append({"turn": turn.ask_line, "ask": turn.ask_preview, "run": "-",
                          "calls": turn.calls, "share": "", "referenced": ""})
             continue
         for run in turn.runs:
-            if not turn.refs:
+            if not turn.refs or not run.paths:
                 referenced = "-"
             else:
                 referenced = "yes" if run.referenced else "no"
