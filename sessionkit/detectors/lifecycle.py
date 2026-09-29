@@ -51,7 +51,7 @@ def _duration_is_approval_wait(harness: str, call: ToolCall, call_role: str) -> 
     if harness != "claude-code":
         return False
     if call_role in ("read", "search"):
-        return not (call.name.startswith("mcp__") or call.name in _REMOTE_SEARCH)
+        return call.name not in _REMOTE_SEARCH
     if call_role == "exec":
         timeout = declared_timeout_ms(harness, call)
         return bool(timeout) and call.dur_ms > _TIMEOUT_OVERRUN * timeout
