@@ -36,7 +36,7 @@ tractable.
 | Layer | Command | Budget | Content |
 |---|---|---|---|
 | **1 — index** | `sk index` | ~12 KB | one line per session |
-| **2 — aggregate** | `sk errors`, `sk doctor` | ~4 KB | clusters and counts, one exemplar each |
+| **2 — aggregate** | `sk errors`, `sk findings`, `sk doctor` | ~4 KB | clusters and counts, one exemplar each |
 | **3 — excerpt** | `sk show <sid> --mode …` | ~8 KB | one session, surgically |
 
 Every command takes `--budget-kb` and `--json`. **Truncation is never silent** — a capped table
@@ -48,12 +48,13 @@ than no report.
 | Command | Purpose |
 |---|---|
 | `doctor` | Source reachability, corpus totals, unpriced models |
-| `index` | Layer 1 session list; `--since --project --source --state --subagents` |
+| `index` | Layer 1 session list; `--since --project --source --state --finding --subagents` |
 | `show <sid>` | Layer 3 excerpt; `--mode summary\|timeline\|messages\|tools\|errors` |
-| `errors` | Layer 2 failure clusters; `--group-by class\|tool\|signature\|session` |
+| `errors` | Layer 2 failure clusters; `--group-by class\|tool\|signature\|session\|model\|harness` |
 | `commands` | Every tool call fleet-wide; `--group-by command\|tool\|session\|agent --agent-type` |
 | `hooks` | Hook block/deny failures joined against `settings.json` |
-| `forensics <sid>` | Layer 3: why one session went wrong |
+| `forensics <sid>` | Layer 3 post-mortem: tiered findings, focus profile, anchored timeline, health |
+| `findings` | Layer 2 detector findings as rates; `--group-by kind\|model\|harness\|project\|session --tier --family --kind` |
 | `children <sid>` | Agent dispatches from one session, resolved to child sid |
 | `cost [sid]` | Layer 2/3 token/dollar totals; `--bloat --subagents` |
 | `tail <sid>\|--all` | Last N turns of one session, with a tail signal |

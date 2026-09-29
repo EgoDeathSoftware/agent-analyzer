@@ -18,7 +18,7 @@ Route correctly before you start; these three overlap in the obvious reading:
 | Ask | Skill |
 |---|---|
 | "What keeps failing across my sessions?" | **this skill** |
-| "Why did *this* session fail / loop / stall?" | `session-forensics` |
+| "Why did *this* session fail / loop / stall / drift?" (a post-mortem) | `session-forensics` |
 | "Why is this project expensive?" | `cost-forensics` |
 | "Audit this project's CLAUDE.md / hooks / MCP config" | `auditing-claude-projects` |
 | "Stop asking me for permission so often" | `fewer-permission-prompts` |
@@ -30,11 +30,20 @@ If the user named one session, you are in the wrong skill.
 All analysis goes through the sessionkit CLI. **Never read transcripts directly** — the corpus
 is tens of megabytes and the CLI exists to keep it out of your context.
 
-```bash
-SK=/mnt/c/Users/david/Projects/CAT_AI/claude-session-analyzer/sk
-```
+Resolve `$SK` in order and stop with a named error if all three miss:
 
-If that path does not exist, say so and stop; do not fall back to grepping `~/.claude`.
+```bash
+if [ -n "$SK" ] && [ -x "$SK" ]; then
+  :  # already set
+elif command -v sk >/dev/null 2>&1; then
+  SK=sk
+elif [ -x /workspace/sk ]; then
+  SK=/workspace/sk
+else
+  echo "sk not found: set \$SK, put sk on PATH, or run from the sessionkit repo" >&2
+  exit 1
+fi
+```
 
 ## Procedure
 
@@ -67,6 +76,22 @@ $SK errors --group-by tool                      # which tool is failing
 $SK errors --group-by session                   # is it one bad session or many?
 ```
 
+### 3b. Findings, not just failed calls
+
+Loops, drift, degeneration and stalls are not failed tool calls, so `sk errors` cannot see
+them. `sk findings` reports detector findings as **rates** (sessions affected out of sessions
+in the group):
+
+```bash
+$SK findings --group-by kind --since 30d                  # what goes wrong most
+$SK findings --group-by model --kind degeneration         # is it one model?
+$SK findings --group-by harness                           # Claude Code vs pi
+$SK errors --group-by model                               # failed calls per model, with reach
+```
+
+Compare rates, never raw counts: the most-used model always has the most findings. A group
+with fewer than 10 sessions has no meaningful rate yet, so say so.
+
 ### 4. Confirm a cause on a real session
 
 Only now open individual sessions, and only the two or three that matter:
@@ -89,8 +114,8 @@ Then ask whether to apply any of them. Do not apply unprompted.
 
 ## Fix types, in order of preference
 
-1. **A CLAUDE.md rule** — best for anything self-inflicted and predictable. Stops the bad call
-   from being emitted at all.
+1. **An instructions-file rule** — `CLAUDE.md` for Claude Code, `AGENTS.md` for pi (pi
+   also reads `CLAUDE.md`). Best for anything self-inflicted and predictable.
 2. **A hook change** — only when the behaviour must be enforced rather than requested.
 3. **Install/remove a dependency** — for `missing-tool`.
 4. **A permission allowlist entry** — hand off to `fewer-permission-prompts` rather than
@@ -127,6 +152,12 @@ already present but buried or ambiguously worded before recommending a new one.
 | `rate-limit` / `api-error` | External | Backoff, or a different provider |
 | `exit-code` | Genuine failure | Often nothing systemic |
 | `no-result` | Session interrupted mid-call | Hand off to `unfinished-work` |
+| `edit-mismatch` | Editing from a stale view | "Re-read before editing" rule |
+| `invalid-args` / `unknown-tool` | Model misreads its tool schema | A usage example in the instructions file; compare models |
+| `args-dropped` / `tool-text-leak` | Serving-stack tool-call parser | vLLM parser/chat template for that model |
+| `truncated-call` / `context-overflow` | Token limits | `maxTokens` / window settings in pi's `models.json` |
+| `auth` / `network` | Provider or model server | Re-authenticate; server health and load |
+| `tool-error-structured` | A tool's own rules rejected the input | Read the errors list; fix the input pattern |
 | `other` | Taxonomy gap | Report the signature so the taxonomy can grow |
 
 A large `other` bucket is a finding: it means the taxonomy is missing a real class. Surface the
