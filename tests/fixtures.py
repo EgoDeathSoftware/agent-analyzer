@@ -23,12 +23,14 @@ def user(text: str, ts: str = "2026-08-01T00:00:00Z", **extra: Any) -> dict[str,
 
 def assistant(blocks: list[dict[str, Any]], ts: str = "2026-08-01T00:00:01Z",
               model: str = "claude-opus-5", usage: dict[str, int] | None = None,
-              **extra: Any) -> dict[str, Any]:
+              stop_reason: str | None = None, **extra: Any) -> dict[str, Any]:
     """An assistant turn carrying arbitrary content blocks."""
+    message: dict[str, Any] = {"role": "assistant", "model": model, "content": blocks,
+                               "usage": usage or {"input_tokens": 10, "output_tokens": 5}}
+    if stop_reason is not None:
+        message["stop_reason"] = stop_reason
     return {"type": "assistant", "sessionId": SID, "cwd": CWD, "timestamp": ts,
-            "uuid": f"a-{ts}",
-            "message": {"role": "assistant", "model": model, "content": blocks,
-                        "usage": usage or {"input_tokens": 10, "output_tokens": 5}}, **extra}
+            "uuid": f"a-{ts}", "message": message, **extra}
 
 
 def tool_use(tid: str, name: str, tool_input: dict[str, Any]) -> dict[str, Any]:

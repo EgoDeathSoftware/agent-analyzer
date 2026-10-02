@@ -3,8 +3,10 @@
 **Status:** Phase 0 (scaffolding), Phase 1 (`error-patterns`) and Phase 2 (`sk commands`, `sk
 hooks`, `sk forensics`, `session-forensics`) complete and verified against the live corpus. Phase 3
 (`sk tail`, `sk files`, `unfinished-work`) and Phase 4 (`sk search`) complete. Phase 5 (`sk
-cost`) complete; skill `cost-forensics` still planned. Phases 6–8 planned. Last updated
-2026-09-03.
+cost`) complete; skill `cost-forensics` still planned. Phases 6–8 planned. The agent post-mortem
+(`sk forensics` as a tiered report, `sk findings`, pi support with pi-subagents runs, and the
+`session-forensics` reference) is complete — see
+`docs/superpowers/specs/2026-09-27-agent-postmortem-design.md`. Last updated 2026-09-29.
 
 This document answers **what is being built and what's next**. Why it is built this way is
 `SPEC.md`; what we learned along the way is `NOTES.md`. See `SPEC.md` §6 for the ownership rule —
@@ -54,12 +56,13 @@ and led to over-scoping:
   transcript is 3.7 MB.
 - **The signal is cross-record.** `is_error` lives on the `tool_result`, not the `tool_use`.
   Knowing a call failed means pairing them by id. The taxonomy on top is order-dependent
-  (§6.1) — 308 lines in `classify.py`. No search expresses it.
+  (§6.1) — the table in `taxonomy.py`. No search expresses it.
 - **Improvising the glob undercounts silently.** Subagents sit one level deeper and carry the
   *parent's* `sessionId` (§3.1). Miss that and you drop 41% of files while reporting a confident
   number over 59% of the corpus. This already happened once — see the arithmetic correction in
   `NOTES.md` §3.
-- **Determinism.** 96 tests pin the taxonomy. "73/269, 27.1%" is worthless if it moves run to run.
+- **Determinism.** 503 tests pin the taxonomy and detectors. "73/269, 27.1%" is worthless if it
+  moves run to run.
 
 ### The honest limit, which is what sets scope
 
@@ -428,9 +431,13 @@ Two consequences that would otherwise arrive as bugs:
 a session **are** the loop signal — this field is why forensics is cheap.
 
 `sessions.end_state` ∈ `complete | interrupted-tool | interrupted-user | killed-agents |
-compacted-idle | error-cascade | unknown`.
+compacted-idle | error-cascade | aborted | output-truncated | agent-unresponsive | unknown`
+(derived in `classify.py`).
 
 ### 6.1 Error taxonomy (implemented)
+
+The single failure table is `sessionkit/taxonomy.py`: each error class and finding kind has a
+family, tier (`S`, `S->J`, `J`) and fix target. The error classes as first built:
 
 `hook-block`, `user-rejected`, `file-too-large`, `read-truncated`, `stale-read`, `missing-tool`,
 `permission-denied`, `not-a-repo`, `not-found`, `rate-limit`, `api-error`, `mcp-error`, `timeout`,
@@ -446,9 +453,12 @@ bucket is itself a reportable finding. That is how `permission-denied`, `stale-r
 
 ### 6.2 Anomaly detectors (implemented)
 
+The detectors now live in `sessionkit/detectors/` (tool-protocol, generation, loops, lifecycle,
+recovery, alignment, interference); the kinds below were the first set, and
+`taxonomy.THRESHOLDS` holds every threshold. Current kinds: `taxonomy.py`.
+
 `repeat-tool`, `file-thrash`, `read-loop`, `error-cascade`, `hook-pingpong`, `agent-kill`,
-`orphan-subagent`, `compaction-churn`, `stall`, `rejection-persist`. Thresholds live in one
-`THRESHOLDS` dict.
+`orphan-subagent`, `compaction-churn`, `stall`, `rejection-persist`.
 
 ### 6.3 Layout
 
@@ -462,7 +472,11 @@ claude-session-analyzer/              # own repo, sibling of the tracker
     parse.py                          # record → normalised events
     corpus.py                         # on-demand parse + post-parse pipeline
     query.py                          # aggregations
-    classify.py                       # error taxonomy, end-state, anomaly detectors
+    taxonomy.py                       # failure table, tiers, fix targets, THRESHOLDS
+    harness.py                        # tool roles per harness (Claude Code, pi)
+    detectors/                        # anomaly and post-mortem detectors
+    classify.py                       # end-state and tail-signal derivation
+    parse_pi.py  features.py          # pi parser; parse-time text features
     pricing.py                        # model rates (mirrors the tracker's server/src/pricing.ts)
     redact.py                         # secret scrubbing before anything is rendered
     render.py                         # budget-enforced emitters
@@ -800,7 +814,7 @@ than a complaint.
 
 - **Runtime stdlib-only; tests stdlib-only.**
   `PYTHONPATH=. python3 -m unittest discover -s tests -t .`
-- 96 tests across parsing, taxonomy, detectors, pricing, budget enforcement, the query layer, and
+- 503 tests across parsing, taxonomy, detectors, pricing, budget enforcement, the query layer, and
   end-to-end load-and-report.
 - Fixtures are built inline, so each test shows the transcript shape it asserts against.
 - Every detector has a positive **and** a negative case.

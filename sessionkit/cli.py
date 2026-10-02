@@ -14,7 +14,7 @@ from datetime import datetime, timedelta, timezone
 
 from sessionkit import __version__, corpus as corpus_mod, pricing, query, search
 from sessionkit import sources as src_mod
-from sessionkit.classify import classify_error
+from sessionkit.taxonomy import TIER_CANDIDATE, classify_error
 from sessionkit.corpus import Corpus
 from sessionkit.render import (BUDGET_AGGREGATE_KB, BUDGET_EXCERPT_KB, BUDGET_INDEX_KB,
                                Report, human_cost)
@@ -67,6 +67,7 @@ def _scope(args: argparse.Namespace) -> query.Filter:
         state=getattr(args, "state", None) or "",
         subagents=getattr(args, "subagents", "include"),
         label_contains=getattr(args, "label_contains", None) or "",
+        finding=getattr(args, "finding", None) or "",
     )
 
 
@@ -115,7 +116,10 @@ def _index_cutoff(args: argparse.Namespace) -> str:
 
     Layer 1 is meant for "what have I been doing", so it defaults to the last 3 days rather
     than the whole corpus. ``--today``/``--last`` narrow or widen that window; an explicit
-    ``--since`` (shared with every other query command) still wins outright.
+    ``--since`` (shared with every other query command) still wins outright. ``--finding``
+    changes the question to "which sessions ever had this finding", so when it is given alone
+    — none of ``--since``/``--today``/``--last`` — the default 3-day window is dropped in
+    favour of the whole corpus; a finding's sessions are routinely older than 3 days.
     """
     since, today, last = args.since, args.today, args.last
     if sum(bool(x) for x in (since, today, last is not None)) > 1:
@@ -128,6 +132,8 @@ def _index_cutoff(args: argparse.Namespace) -> str:
         if last < 1:
             raise SystemExit(f"--last must be a positive integer, got {last}")
         return f"{last}d"
+    if getattr(args, "finding", None):
+        return ""
     return "3d"
 
 
@@ -169,15 +175,52 @@ def cmd_errors(corpus: Corpus, args: argparse.Namespace) -> str:
     report.meta(failures=total, tool_calls=calls, failure_rate=_pct(total, calls),
                 grouped_by=args.group_by)
     report.section(f"Failures by {args.group_by}")
+    reach = args.group_by in ("model", "harness")
+    # model/harness rows drop fix/exemplar: an exemplar there is an arbitrary preview across
+    # mixed error classes, not a fix for the row it's shown on. sessions_in_group replaces it
+    # with the rate's own denominator, next to reach.
+    extra_headers = ["reach", "sessions_in_group"] if reach else ["fix", "exemplar"]
     report.table(
-        ["bucket", "count", "share", "sessions", "fix", "exemplar"],
-        [[r["bucket"] or "-", r["n"], _pct(r["n"], total), r["sessions"],
-          classify_error(r["exemplar"])[1], r["exemplar"] or ""] for r in rows],
+        ["bucket", "count", "share", "sessions"] + extra_headers,
+        [[r["bucket"] or "-", r["n"], _pct(r["n"], total), r["sessions"]]
+         + ([_pct(r["sessions"], r["sessions_in_group"]), r["sessions_in_group"]] if reach
+            else [classify_error(r["exemplar"])[1], r["exemplar"] or ""]) for r in rows],
         key="clusters",
     )
     if args.group_by == "class" and rows:
         report.section("Reading this")
         report.text(_headline(corpus, scope, rows, total))
+    return report.render()
+
+
+def cmd_findings(corpus: Corpus, args: argparse.Namespace) -> str:
+    """Layer 2: detector findings across the fleet, as rates per kind, model, harness,
+    project or session — the input for "what does this model keep getting wrong"."""
+    scope = _scope(args)
+    rows = query.findings_rows(corpus, scope, args.group_by, args.tier or "",
+                               args.family or "", args.kind or "")
+    total = query.session_count(corpus, scope)
+    report = Report(args.json, args.budget_kb or BUDGET_AGGREGATE_KB)
+    report.meta(sessions=total, grouped_by=args.group_by)
+    report.section(f"Findings by {args.group_by}")
+    if args.group_by == "kind":
+        report.table(["kind", "tier", "family", "occurrences", "sessions", "rate"],
+                     [[r["kind"], r["tier"], r["family"], r["occurrences"],
+                       r["sessions_affected"], _pct(r["sessions_affected"], total)]
+                      for r in rows], key="findings")
+    else:
+        report.table(["group", "occurrences", "sessions_affected", "sessions_in_group", "rate"],
+                     [[r["group"], r["occurrences"], r["sessions_affected"],
+                       r["sessions_in_group"], _pct(r["sessions_affected"],
+                                                    r["sessions_in_group"])]
+                      for r in rows], key="findings")
+    if args.group_by == "model":
+        report.text("Grouped by each session's last model; a session that switched models "
+                    "counts under the final one.")
+    # Every session grouping has exactly one session per group by construction, so the note
+    # would fire unconditionally there and say nothing useful.
+    if args.group_by != "session" and any(r.get("sessions_in_group", total) < 10 for r in rows):
+        report.text("Groups with fewer than 10 sessions: their rates are not meaningful yet.")
     return report.render()
 
 
@@ -240,30 +283,46 @@ def cmd_hooks(corpus: Corpus, args: argparse.Namespace) -> str:
 
 
 def cmd_forensics(corpus: Corpus, args: argparse.Namespace) -> str:
-    """Why one session went wrong: findings, a line-anchored timeline, and what went right.
+    """Why one session went wrong: tiered findings, the focus profile, an anchored timeline,
+    and health.
 
     Deterministic by design — findings and hints are looked up from the detectors and
-    ``classify.ANOMALY_HINTS``, not generated, so this is a report, not a narrative.
+    ``taxonomy``, not generated, so this is a report, not a narrative. The narrative is the
+    ``session-forensics`` skill's job.
     """
     entry = query.find_session(corpus, args.sid)
     if entry is None:
         raise SystemExit(f"no session matching {args.sid!r} (try `sk index`)")
-
+    session = entry.session
     findings = query.forensics_findings(entry)
-    health = query.forensics_health(entry)
 
     report = Report(args.json, args.budget_kb or BUDGET_EXCERPT_KB)
-    report.meta(sid=entry.session.sid, project=entry.project_key,
-               state=entry.session.end_state, findings=len(findings))
-    if entry.session.end_reason:
-        report.text(f"End reason: {entry.session.end_reason}")
+    report.meta(sid=session.sid, project=entry.project_key, harness=session.harness or "-",
+                model=session.model or "-", state=session.end_state, findings=len(findings))
+    if session.end_reason:
+        report.text(f"End reason: {session.end_reason}")
 
     report.section("Findings")
     report.table(
-        ["kind", "detail", "count", "lines", "prevention"],
-        [[f["kind"], f["detail"], f["count"], ",".join(str(n) for n in f["lines"]), f["hint"]]
-         for f in findings],
+        ["tier", "family", "kind", "detail", "count", "lines", "fix_target", "hint"],
+        [["candidate" if f["tier"] == TIER_CANDIDATE else f["tier"], f["family"], f["kind"],
+          f["detail"], f["count"], ",".join(str(n) for n in f["lines"]), f["fix_target"],
+          f["hint"]] for f in findings],
         key="findings",
+    )
+    if any(f["tier"] == TIER_CANDIDATE for f in findings):
+        report.text("Rows marked `candidate` are hypotheses: confirm or dismiss each against "
+                    "its cited lines before reporting it.")
+    # Health renders right after Findings, not last: on a long session, Focus profile and
+    # Timeline can exhaust the budget on their own, and Health must not be the section that
+    # silently disappears when that happens.
+    _forensics_health_section(report, query.forensics_health(entry))
+    report.section("Focus profile")
+    report.table(
+        ["turn", "ask", "run", "calls", "share", "referenced"],
+        [[r["turn"], r["ask"], r["run"], r["calls"], r["share"], r["referenced"]]
+         for r in query.focus_profile_rows(entry)],
+        key="focus",
     )
     report.section("Timeline (finding-anchored)")
     report.table(
@@ -272,15 +331,26 @@ def cmd_forensics(corpus: Corpus, args: argparse.Namespace) -> str:
          for r in query.forensics_timeline(entry)],
         key="timeline",
     )
+    return report.render()
+
+
+def _forensics_health_section(report: Report, health: query.Row) -> None:
+    """Tool success plus model behaviour: stop reasons, empty turns, reasoning, latency."""
+    stops = ", ".join(f"{k}={v}" for k, v in sorted(health["stop_reasons"].items())) or "-"
+    ratio = health["reasoning_ratio"]
+    latency = health["median_latency_s"]
     report.section("Health")
     report.table(
         ["metric", "value"],
         [["tool calls", health["tool_calls"]], ["succeeded", health["succeeded"]],
          ["failed", health["failed"]],
-         ["success rate", _pct(health["succeeded"], health["tool_calls"])]],
+         ["success rate", _pct(health["succeeded"], health["tool_calls"])],
+         ["stop reasons", stops], ["empty turns", health["empty_turns"]],
+         ["reasoning/visible", "-" if ratio is None else f"{ratio:.2f}"],
+         ["compactions", health["compactions"]],
+         ["median turn latency", "-" if latency is None else f"{latency}s"]],
         key="health",
     )
-    return report.render()
 
 
 def cmd_children(corpus: Corpus, args: argparse.Namespace) -> str:
@@ -799,6 +869,8 @@ def build_parser() -> argparse.ArgumentParser:
                          help="only sessions ended today (UTC); default is the last 3 days")
     p_index.add_argument("--last", type=int, metavar="N",
                          help="only sessions ended in the last N days; default is 3")
+    p_index.add_argument("--finding", help="only sessions with this finding kind, e.g. "
+                                           "drift-candidate")
     _subagents_arg(p_index, "exclude")
 
     p_show = sub.add_parser("show", parents=[common_sub],
@@ -813,9 +885,21 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_err = sub.add_parser("errors", parents=[common_sub, scoped],
                            help="cluster tool failures fleet-wide (layer 2)")
-    p_err.add_argument("--group-by", choices=["class", "tool", "signature", "session"],
+    p_err.add_argument("--group-by",
+                       choices=["class", "tool", "signature", "session", "model", "harness"],
                        default="class")
     _subagents_arg(p_err, "exclude")
+
+    p_find = sub.add_parser("findings", parents=[common_sub, scoped],
+                            help="detector findings fleet-wide, as rates (layer 2)")
+    p_find.add_argument("--group-by", choices=["kind", "model", "harness", "project", "session"],
+                        default="kind")
+    p_find.add_argument("--tier", choices=["S", "S->J", "J"])
+    p_find.add_argument("--family", choices=["tool-protocol", "generation", "loop",
+                                             "lifecycle", "recovery", "alignment",
+                                             "environment"])
+    p_find.add_argument("--kind", help="one finding kind, e.g. degeneration")
+    _subagents_arg(p_find, "exclude")
 
     p_cmd = sub.add_parser("commands", parents=[common_sub, scoped],
                            help="review every tool call: what actually ran")
@@ -906,9 +990,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 COMMANDS = {"doctor": cmd_doctor, "index": cmd_index, "show": cmd_show, "errors": cmd_errors,
-             "commands": cmd_commands, "hooks": cmd_hooks, "forensics": cmd_forensics,
-             "children": cmd_children, "cost": cmd_cost, "tail": cmd_tail, "files": cmd_files,
-             "search": cmd_search}
+             "findings": cmd_findings, "commands": cmd_commands, "hooks": cmd_hooks,
+             "forensics": cmd_forensics, "children": cmd_children, "cost": cmd_cost,
+             "tail": cmd_tail, "files": cmd_files, "search": cmd_search}
 
 
 def main(argv: list[str] | None = None) -> int:

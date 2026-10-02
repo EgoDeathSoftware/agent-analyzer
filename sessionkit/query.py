@@ -14,14 +14,19 @@ from __future__ import annotations
 import fnmatch
 import json
 import os
+import statistics
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path, PurePath
 from typing import Any, Callable, Iterable
 
-from sessionkit import pricing, settingsjson as sj
-from sessionkit.classify import ANOMALY_HINTS, signature
+from sessionkit import features, pricing, settingsjson as sj
+from sessionkit.detectors.alignment import focus_profile
+from sessionkit.detectors.base import assistant_turns
+from sessionkit.detectors.generation import assistant_latencies
+from sessionkit.taxonomy import TIER_CANDIDATE, TIER_J, TIER_S, lookup, signature
 from sessionkit.corpus import Corpus, Loaded
+from sessionkit.harness import role
 from sessionkit.parse import ToolCall, block_text, read_line
 from sessionkit.redact import redact
 
@@ -41,7 +46,7 @@ def is_failure(tool: ToolCall) -> bool:
 @dataclass
 class Filter:
     """The shared scope flags: ``--since``/``--project``/``--source``/``--state``/
-    ``--label-contains``."""
+    ``--label-contains``/``--finding``."""
 
     cutoff: str = ""
     project: str = ""
@@ -49,6 +54,7 @@ class Filter:
     state: str = ""
     subagents: str = "include"
     label_contains: str = ""
+    finding: str = ""
 
     def matches(self, entry: Loaded) -> bool:
         """Whether a session is in scope."""
@@ -69,6 +75,8 @@ class Filter:
             label = (session.title or session.first_prompt or "").lower()
             if self.label_contains.lower() not in label:
                 return False
+        if self.finding and not any(a.kind == self.finding for a in entry.anomalies):
+            return False
         return True
 
     def apply(self, corpus: Corpus) -> list[Loaded]:
@@ -149,6 +157,8 @@ _GROUP_KEY: dict[str, Callable[[Loaded, ToolCall], str]] = {
     "tool": lambda e, t: t.name,
     "signature": lambda e, t: t.err_detail,
     "session": lambda e, t: e.session.sid,
+    "model": lambda e, t: e.session.model or "-",
+    "harness": lambda e, t: e.session.harness or "-",
 }
 
 
@@ -170,8 +180,10 @@ def clusters(corpus: Corpus, scope: Filter, group_by: str) -> list[Row]:
     ordering means two runs over an unchanged corpus cannot disagree.
     """
     key_of = _GROUP_KEY[group_by]
+    scoped = scope.apply(corpus)
+    sizes = _group_sizes(scoped, group_by)
     buckets: dict[str, dict[str, Any]] = {}
-    for entry, tool in _failures(scope.apply(corpus)):
+    for entry, tool in _failures(scoped):
         key = key_of(entry, tool)
         bucket = buckets.setdefault(key, {"bucket": key, "n": 0, "sids": set(),
                                           "names": [], "previews": []})
@@ -181,9 +193,90 @@ def clusters(corpus: Corpus, scope: Filter, group_by: str) -> list[Row]:
         bucket["previews"].append(tool.output_preview)
     out = [{"bucket": b["bucket"], "n": b["n"], "sessions": len(b["sids"]),
             "tool": min(b["names"]) if b["names"] else "",
-            "exemplar": min(b["previews"]) if b["previews"] else ""}
+            "exemplar": min(b["previews"]) if b["previews"] else "",
+            "sessions_in_group": sizes.get(b["bucket"], len(scoped))}
            for b in buckets.values()]
     out.sort(key=lambda r: (-r["n"], r["bucket"] or ""))
+    return out
+
+
+#: Per-session grouping keys shared by `sk findings` and the model/harness error groupings.
+_FINDING_GROUP: dict[str, Callable[[Loaded], str]] = {
+    "model": lambda e: e.session.model or "-",
+    "harness": lambda e: e.session.harness or "-",
+    "project": lambda e: e.project_key,
+    "session": lambda e: e.session.sid,
+}
+
+
+def _group_sizes(scoped: list[Loaded], group_by: str) -> dict[str, int]:
+    """Sessions per model or harness — the denominator a per-group rate needs."""
+    if group_by not in ("model", "harness"):
+        return {}
+    key_of = _FINDING_GROUP[group_by]
+    sizes: dict[str, int] = {}
+    for entry in scoped:
+        key = key_of(entry)
+        sizes[key] = sizes.get(key, 0) + 1
+    return sizes
+
+
+def _finding_wanted(anomaly: Any, tier: str, family: str, kind: str) -> bool:
+    known = lookup(anomaly.kind)
+    if kind and anomaly.kind != kind:
+        return False
+    if tier and (known.tier if known else TIER_S) != tier:
+        return False
+    return not family or (known is not None and known.family == family)
+
+
+def findings_rows(corpus: Corpus, scope: Filter, group_by: str, tier: str = "",
+                  family: str = "", kind: str = "") -> list[Row]:
+    """Detector findings across the fleet, as rates: sessions affected out of sessions in the
+    group. Without the denominator, whichever model is used most always looks worst."""
+    entries = scope.apply(corpus)
+    if group_by == "kind":
+        return _findings_by_kind(entries, tier, family, kind)
+    key_of = _FINDING_GROUP[group_by]
+    groups: dict[str, Row] = {}
+    for entry in entries:
+        key = key_of(entry)
+        row = groups.setdefault(key, {"group": key, "occurrences": 0, "sessions_affected": 0,
+                                      "sessions_in_group": 0})
+        row["sessions_in_group"] += 1
+        hits = [a for a in entry.anomalies if _finding_wanted(a, tier, family, kind)]
+        if hits:
+            row["sessions_affected"] += 1
+            row["occurrences"] += sum(a.count for a in hits)
+    rows = list(groups.values())
+    for row in rows:
+        row["rate"] = row["sessions_affected"] / row["sessions_in_group"]
+    rows.sort(key=lambda r: (-r["rate"], -r["occurrences"], r["group"]))
+    return rows
+
+
+def _findings_by_kind(entries: list[Loaded], tier: str, family: str, kind: str) -> list[Row]:
+    rows: dict[str, Row] = {}
+    for entry in entries:
+        seen: set[str] = set()
+        for anomaly in entry.anomalies:
+            if not _finding_wanted(anomaly, tier, family, kind):
+                continue
+            known = lookup(anomaly.kind)
+            row = rows.setdefault(anomaly.kind, {
+                "kind": anomaly.kind, "tier": known.tier if known else TIER_S,
+                "family": known.family if known else "", "occurrences": 0,
+                "sessions_affected": 0})
+            row["occurrences"] += anomaly.count
+            if anomaly.kind not in seen:
+                seen.add(anomaly.kind)
+                row["sessions_affected"] += 1
+    total = len(entries)
+    out = list(rows.values())
+    for row in out:
+        row["sessions_in_group"] = total
+        row["rate"] = row["sessions_affected"] / total if total else 0.0
+    out.sort(key=lambda r: (-r["sessions_affected"], -r["occurrences"], r["kind"]))
     return out
 
 
@@ -285,8 +378,11 @@ def timeline_rows(entry: Loaded) -> list[Row]:
     rows: list[Row] = []
     session = entry.session
     for message in session.messages:
+        detail = message.preview
+        if not detail and message.error_text:
+            detail = f"[{message.stop_reason}] {message.error_text}"
         rows.append({"line": message.line, "kind": "msg", "name": message.role,
-                     "detail": message.preview})
+                     "detail": detail})
     for tool in session.tools:
         detail = f"[{tool.err_class}] {tool.err_detail}" if tool.is_error else tool.input_preview
         rows.append({"line": tool.line, "kind": "tool", "name": tool.name, "detail": detail})
@@ -331,7 +427,9 @@ def full_message(entry: Loaded, message: Any) -> str:
     if rec is None:
         return message.preview
     content = (rec.get("message") or {}).get("content")
-    return redact(block_text(content)) if content is not None else message.preview
+    if content is None:
+        return message.preview
+    return redact(features.split_content(content, "")[0])
 
 
 def message_rows(entry: Loaded, lo: int, hi: int, full: bool = False) -> list[Row]:
@@ -374,7 +472,7 @@ def tail_context(entry: Loaded, n: int = 6) -> dict[int, str]:
         if record is not None:
             content = ((record.get("message") or {}).get("content")
                        if isinstance(record.get("message"), dict) else None)
-            text = parse.block_text(content) if content is not None else ""
+            text = features.split_content(content, "")[0] if content is not None else ""
         result[message.line] = text or (message.preview or "")
     return result
 
@@ -730,11 +828,23 @@ def deny_rows(corpus: Corpus, scope: Filter) -> list[Row]:
 
 # --- forensics ------------------------------------------------------------------------------
 
+_TIER_ORDER = {TIER_S: 0, TIER_CANDIDATE: 1, TIER_J: 2}
+
+
 def forensics_findings(entry: Loaded) -> list[Row]:
-    """One session's anomalies, most frequent first, each with its prevention hint."""
-    ordered = sorted(entry.anomalies, key=lambda a: -a.count)
-    return [{"kind": a.kind, "detail": a.detail, "count": a.count, "lines": a.lines,
-             "hint": ANOMALY_HINTS.get(a.kind, "")} for a in ordered]
+    """One session's findings: structural first, then candidates, most frequent first within
+    a tier. Each carries its taxonomy tier, family, fix target and hint."""
+    rows = []
+    for a in entry.anomalies:
+        known = lookup(a.kind)
+        rows.append({"kind": a.kind, "detail": a.detail, "count": a.count, "lines": a.lines,
+                     "tier": known.tier if known else TIER_S,
+                     "family": known.family if known else "",
+                     "fix_target": known.fix_target if known else "",
+                     "hint": known.hint if known else ""})
+    rows.sort(key=lambda r: (_TIER_ORDER.get(r["tier"], len(_TIER_ORDER)), -r["count"],
+                             r["kind"]))
+    return rows
 
 
 def forensics_timeline(entry: Loaded) -> list[Row]:
@@ -744,16 +854,83 @@ def forensics_timeline(entry: Loaded) -> list[Row]:
 
 
 def forensics_health(entry: Loaded) -> Row:
-    """Totals for the 'what went right' counterweight: a forensics report is not pure negativity."""
-    tools = entry.session.tools
+    """The 'what went right' counterweight, plus how the model itself behaved.
+
+    ``stop_reasons`` and ``empty_turns`` are counted per whole model message (one
+    :func:`~sessionkit.detectors.base.assistant_turns` group), not per record — Claude Code
+    writes one record per content block and every record carries the message's final stop
+    reason, so per-record counts would double both. ``median_latency_s`` keeps only the
+    latency of each group's first record, so per-block gaps within one message can't drag the
+    median down.
+    """
+    session = entry.session
+    tools = session.tools
     failed = sum(1 for t in tools if is_failure(t))
-    return {"tool_calls": len(tools), "failed": failed, "succeeded": len(tools) - failed}
+    assistants = [m for m in session.messages if m.role == "assistant"]
+    turns = assistant_turns(session)
+    stops: dict[str, int] = {}
+    empty_turns = 0
+    first_uuids = {turn[0].uuid for turn in turns}
+    for turn in turns:
+        key = turn[-1].stop_reason or "unrecorded"
+        stops[key] = stops.get(key, 0) + 1
+        if key == "end" and not any(m.tool_calls or m.text_len for m in turn):
+            empty_turns += 1
+    visible = sum(m.text_len for m in assistants)
+    reasoning = sum(m.reasoning_len for m in assistants)
+    latencies = [ms for m, ms in assistant_latencies(session) if m.uuid in first_uuids]
+    return {
+        "tool_calls": len(tools), "failed": failed, "succeeded": len(tools) - failed,
+        "stop_reasons": stops,
+        "empty_turns": empty_turns,
+        # Current Claude Code redacts thinking text, so most sessions have reasoning_len == 0
+        # for reasons unrelated to whether the model reasoned — a redacted block is
+        # indistinguishable from an absent one without a parser field for it, so the ratio is
+        # reported as unknown (None, shown "-") rather than a misleading 0.
+        "reasoning_ratio": round(reasoning / visible, 2) if reasoning and visible else None,
+        "compactions": sum(1 for e in session.sysev if e.subtype == "compaction"),
+        "median_latency_s": int(statistics.median(latencies) // 1000) if latencies else None,
+    }
+
+
+def focus_profile_rows(entry: Loaded) -> list[Row]:
+    """Per user turn, where the effort went. A turn holding a drift candidate is expanded
+    into its runs; every other turn is one summary row, so long sessions stay in budget.
+
+    A user turn with no tool calls at all (a plain chat reply) is dropped from the summary
+    rows entirely rather than printed as an all-zero row — real sessions have many of these,
+    and they add nothing to a report about where effort went.
+
+    A run's ``referenced`` is printed ``-`` rather than yes/no when there is nothing to check
+    it against: the ask named no refs at all, or the run itself touched no paths (e.g. a bare
+    exec command) — :class:`~sessionkit.detectors.alignment.Run` defaults ``referenced`` to
+    ``True`` in both cases, which would otherwise misleadingly read ``yes``.
+    """
+    flagged = {line for a in entry.anomalies if a.kind == "drift-candidate" for line in a.lines}
+    rows: list[Row] = []
+    for turn in focus_profile(entry.session):
+        expanded = turn.calls and any(flagged.intersection(r.lines) for r in turn.runs)
+        if not expanded:
+            if not turn.calls:
+                continue
+            rows.append({"turn": turn.ask_line, "ask": turn.ask_preview, "run": "-",
+                         "calls": turn.calls, "share": "", "referenced": ""})
+            continue
+        for run in turn.runs:
+            if not turn.refs or not run.paths:
+                referenced = "-"
+            else:
+                referenced = "yes" if run.referenced else "no"
+            rows.append({"turn": turn.ask_line, "ask": turn.ask_preview, "run": run.key,
+                         "calls": len(run.lines), "share": f"{len(run.lines) / turn.calls:.0%}",
+                         "referenced": referenced})
+    return rows
 
 
 # --- children ---------------------------------------------------------------------------
 
 def children_rows(entry: Loaded, corpus: Corpus) -> list[Row]:
-    """Every ``Agent`` dispatch from one session, resolved to its child via the exact
+    """Every dispatch-role call from one session, resolved to its child via the exact
     task-notification join (``parse.py``'s ``dispatch_edges``) — never by timestamp or dispatch
     order, which FIRSTRUN.md §8 found silently mispairs retries and non-adjacent completions.
 
@@ -763,7 +940,7 @@ def children_rows(entry: Loaded, corpus: Corpus) -> list[Row]:
     by_sid = {c.session.sid: c for c in corpus.sessions if c.session.is_subagent}
     out: list[Row] = []
     for tool in entry.session.tools:
-        if tool.name != "Agent":
+        if role(entry.session.harness, tool.name) != "dispatch":
             continue
         task_id = edges.get(tool.tool_use_id, "")
         child = by_sid.get(task_id) if task_id else None
@@ -782,7 +959,7 @@ def children_rows(entry: Loaded, corpus: Corpus) -> list[Row]:
 
 
 def _agent_description(tool: ToolCall) -> str:
-    """Best-effort dispatch description from an ``Agent`` call's input."""
+    """Best-effort dispatch description from a dispatch-role call's input."""
     try:
         parsed = json.loads(tool.input_preview)
     except (ValueError, TypeError):

@@ -10,27 +10,38 @@ Session JSONL is append-only, which is what makes this safe: nothing rewrites hi
 there is no invalidation problem and no consistency window to protect.
 
 This module owns the *post-parse pipeline*. ``parse_file`` alone returns a session with
-``end_state="unknown"``, no error classes and no anomalies; the four steps in :func:`load_one`
-are what turn it into something the reports can use.
+``end_state="unknown"``, no error classes and no anomalies; the steps in :func:`load_one`
+are what turn it into something the reports can use. ``load_one`` only has one transcript to
+work with, so its anomalies are the within-session detectors; a cross-session finding like
+``resource-interference``, which needs every session in a project at once, is added only once
+:func:`load` has parsed the whole corpus and called :func:`_add_cross_session_findings`.
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
+from sessionkit import live, parse_pi
 from sessionkit import sources as src
-from sessionkit.classify import Anomaly, annotate_errors, derive_end_state, detect
+from sessionkit.classify import annotate_errors, derive_end_state
+from sessionkit.detectors import Anomaly, detect
+from sessionkit.detectors.interference import resource_interference
 from sessionkit.parse import ParsedSession, parse_file, project_key
 
 
 @dataclass
 class Loaded:
-    """One transcript, parsed and fully annotated.
+    """One transcript, parsed and annotated.
 
     ``project_key`` and ``anomalies`` are derived rather than parsed — they are not fields of
     :class:`~sessionkit.parse.ParsedSession` and only exist once :func:`load_one` has run.
+    ``anomalies`` holds only the within-session findings at that point; cross-session findings
+    such as ``resource-interference`` are appended in place by :func:`load`, once every
+    session in the corpus has been loaded and can be compared against its project siblings.
     """
 
     session: ParsedSession
@@ -57,14 +68,16 @@ class Corpus:
 
 
 def transcripts(source: src.Source) -> list[tuple[Path, str]]:
-    """Every ``.jsonl`` transcript under a source, paired with its project directory name.
+    """Every session transcript under a source, paired with its project directory name.
 
-    Two layouts exist and both must be walked. Top-level sessions live at
-    ``projects/<project>/<session>.jsonl``; **subagent** transcripts live one level deeper at
-    ``projects/<project>/<parent-session>/subagents/agent-*.jsonl`` — 36 of this corpus's 87
-    files. Globbing only the top level silently drops every subagent, which would leave
-    delegation analysis with nothing to measure.
+    Claude Code / opencode use `projects/<project>/<session>.jsonl`, with subagent transcripts
+    one level deeper at `projects/<project>/<parent-session>/subagents/agent-*.jsonl`. pi has
+    no projects/ indirection: sessions/<project>/<file>.jsonl directly, plus pi-subagents
+    async runs at sessions/<project>/<parent-stem>/<folder>/run-<n>/session.jsonl.
     """
+    if source.kind == "pi":
+        return _pi_transcripts(source)
+
     found: list[tuple[Path, str]] = []
     root = source.projects_dir
     if not root.is_dir():
@@ -83,22 +96,133 @@ def transcripts(source: src.Source) -> list[tuple[Path, str]]:
     return found
 
 
-def load_one(source: src.Source, path: Path, dir_name: str) -> Loaded:
+def _pi_transcripts(source: src.Source) -> list[tuple[Path, str]]:
+    """Every ``.jsonl`` session under a pi source, paired with its project directory name."""
+    found: list[tuple[Path, str]] = []
+    root = source.sessions_root
+    if not root.is_dir():
+        return found
+    try:
+        entries = sorted(p for p in root.iterdir() if p.is_dir())
+    except OSError:
+        return found
+    for project_dir in entries:
+        try:
+            files = sorted(project_dir.glob("*.jsonl"))
+            files.extend(sorted(project_dir.glob("*/*/run-*/session.jsonl")))
+        except OSError:
+            continue
+        found.extend((f, project_dir.name) for f in files)
+    return found
+
+
+def load_one(source: src.Source, path: Path, dir_name: str,
+             live_sids: frozenset[str] = frozenset()) -> list[Loaded]:
     """Parse one transcript and derive everything the reports need from it.
 
-    The order matters: errors must be classified before ``derive_end_state`` reads them, and
-    both must run before :func:`~sessionkit.classify.detect` looks for anomalies.
+    Returns one `Loaded` for a Claude Code/opencode transcript, or one `Loaded` for a pi
+    session plus one more per synthetic subagent child its `subagent` tool calls produced
+    (parse_pi.py, spec Sec 4) — always at least one entry.
     """
+    if source.kind == "pi":
+        return _load_pi(source, path, dir_name, live_sids)
+
     session = parse_file(path, source.id)
     if source.location == "container":
         session.cwd = src.rewrite_cwd(session.cwd, source.origin)
     annotate_errors(session)
     session.end_state, session.end_reason = derive_end_state(session)
-    anomalies = detect(session)
+    anomalies = detect(session, session.sid in live_sids)
     # tail_signal is left unset here: query.tail_signal() memoises onto the session on first
     # real use, and only `sk tail`/`sk files` ever ask for it — every other command paid for
     # a re-read of each session's last 6 lines from disk for nothing.
-    return Loaded(session, project_key(session.cwd, source.id, dir_name), anomalies)
+    return [Loaded(session, project_key(session.cwd, source.id, dir_name), anomalies)]
+
+
+def _load_pi(source: src.Source, path: Path, dir_name: str,
+             live_sids: frozenset[str]) -> list[Loaded]:
+    """A pi session plus its synthetic subagent children, or one pi-subagents async run."""
+    parent = parse_pi.parse_file(path, source.id)
+    meta = _mark_async_child(parent, path) if _is_async_run(path) else {}
+    annotate_errors(parent)
+    parent.end_state, parent.end_reason = derive_end_state(parent)
+    _apply_exit_code(parent, meta)
+    loaded = [Loaded(parent, project_key(parent.cwd, source.id, dir_name),
+                     detect(parent, parent.sid in live_sids))]
+    for child in parent.child_sessions:
+        annotate_errors(child)
+        # end_state/end_reason were already assigned in parse_pi from the subagent result's
+        # exitCode/stopReason — derive_end_state assumes a live tail of tool calls that a
+        # synthetic child, built from an already-finished subprocess, does not have.
+        loaded.append(Loaded(child, project_key(child.cwd, source.id, dir_name),
+                             detect(child, child.sid in live_sids)))
+    return loaded
+
+
+def _is_async_run(path: Path) -> bool:
+    """A pi-subagents async child run: ``<parent-stem>/<folder>/run-<n>/session.jsonl``."""
+    return path.name == "session.jsonl" and path.parent.name.startswith("run-")
+
+
+def _mark_async_child(session: ParsedSession, path: Path) -> dict[str, Any]:
+    """Mark an async run as a subagent of the session its grandparent folder is named after.
+
+    Returns the run's ``meta.json`` (empty when missing or unreadable) for the exit code.
+    """
+    parent_stem = path.parents[2].name
+    session.is_subagent = True
+    session.parent_sid = parent_stem.split("_", 1)[1] if "_" in parent_stem else parent_stem
+    agent, run_id = parse_pi.async_run_identity(session)
+    meta = _async_meta(path.parents[3] / "subagent-artifacts", run_id)
+    session.agent_type = agent or str(meta.get("agent") or "")
+    return meta
+
+
+def _async_meta(folder: Path, run_id: str) -> dict[str, Any]:
+    """The first readable ``<runId>_*_meta.json`` in ``folder``, or ``{}``."""
+    if not run_id:
+        return {}
+    for candidate in sorted(folder.glob(f"{run_id}_*_meta.json")):
+        try:
+            data = json.loads(candidate.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(data, dict):
+            return data
+    return {}
+
+
+def _apply_exit_code(session: ParsedSession, meta: dict[str, Any]) -> None:
+    """A run that exited non-zero did not complete, whatever its transcript's tail says."""
+    code = meta.get("exitCode")
+    if isinstance(code, bool) or not isinstance(code, int) or code == 0:
+        return
+    if session.end_state == "complete":
+        session.end_state = "error-cascade"
+        session.end_reason = f"subagent run exited with code {code}"
+
+
+def _link_async_runs(sessions: list[Loaded]) -> None:
+    """Resolve a parent's ``run:<runId>`` dispatch edges to the async child's session id."""
+    runs: dict[str, str] = {}
+    for entry in sessions:
+        if entry.session.is_subagent:
+            _agent, run_id = parse_pi.async_run_identity(entry.session)
+            if run_id:
+                runs[run_id] = entry.session.sid
+    for entry in sessions:
+        edges = entry.session.dispatch_edges
+        if any(child.startswith("run:") for _call, child in edges):
+            entry.session.dispatch_edges = [
+                (call, runs.get(child[4:], child) if child.startswith("run:") else child)
+                for call, child in edges]
+
+
+def _add_cross_session_findings(sessions: list[Loaded]) -> None:
+    """Findings that need several sessions at once (spec §2.2 ``resource-interference``)."""
+    pairs = [(entry.project_key, entry.session) for entry in sessions]
+    for entry, extra in zip(sessions, resource_interference(pairs)):
+        entry.anomalies.extend(extra)
 
 
 def _disambiguate(sessions: list[Loaded]) -> None:
@@ -126,31 +250,30 @@ def _disambiguate(sessions: list[Loaded]) -> None:
 def load_session(prefix: str) -> Loaded | None:
     """Parse only the transcripts whose *filename* could hold this session id.
 
-    ``sk show`` needs one session, and parsing the whole corpus to find it costs ~1.1 s against
-    ~0.2 s for the file itself. A session id is normally the transcript's filename (or, for a
-    subagent, the filename minus its ``agent-`` prefix), so candidates can be picked off disk
-    without reading them.
-
-    That mapping is a convention, not a guarantee — the id inside the file wins, and two files
-    in this corpus share one. So every candidate is verified after parsing and a mismatch
-    returns ``None``, which the caller must treat as "fall back to a full :func:`load`".
-    Being wrong here would silently show the wrong session, so the fast path is only ever
-    allowed to *confirm* a hit, never to rule one out.
+    pi's filenames (`<timestamp>_<uuid>.jsonl`) don't share a prefix with either the header's
+    session id or a synthetic child's `<sid>:<call_id>:<i>` id, so the filename pre-filter that
+    speeds this up for Claude Code is skipped for pi sources — every pi file is parsed and
+    checked. Acceptable for now (spec Sec 9); revisit if `sk show` proves slow on a large pi
+    corpus.
     """
     needle = prefix.lower()
     found: list[Loaded] = []
-    for source in src.scannable(src.discover()):
+    sources = src.scannable(src.discover())
+    live_set = frozenset(live.live_sids({s.root for s in sources}))
+    for source in sources:
         for path, dir_name in transcripts(source):
-            stem = path.stem
-            candidate = stem[6:] if stem.startswith("agent-") else stem
-            if not candidate.lower().startswith(needle):
-                continue
+            if source.kind != "pi":
+                stem = path.stem
+                candidate = stem[6:] if stem.startswith("agent-") else stem
+                if not candidate.lower().startswith(needle):
+                    continue
             try:
-                entry = load_one(source, path, dir_name)
+                entries = load_one(source, path, dir_name, live_set)
             except OSError:
                 continue
-            if entry.session.sid.lower().startswith(needle):
-                found.append(entry)
+            for entry in entries:
+                if entry.session.sid.lower().startswith(needle):
+                    found.append(entry)
     if not found:
         return None
     return max(found, key=lambda e: e.session.ended_at or "")
@@ -168,13 +291,17 @@ def load(only: str | None = None) -> Corpus:
     """
     found = src.discover()
     corpus = Corpus(sources=found)
-    for source in src.scannable(found):
+    scannable = src.scannable(found)
+    live_set = frozenset(live.live_sids({s.root for s in scannable}))
+    for source in scannable:
         if only and source.id != only:
             continue
         for path, dir_name in transcripts(source):
             try:
-                corpus.sessions.append(load_one(source, path, dir_name))
+                corpus.sessions.extend(load_one(source, path, dir_name, live_set))
             except OSError:
                 corpus.failed += 1
     _disambiguate(corpus.sessions)
+    _link_async_runs(corpus.sessions)
+    _add_cross_session_findings(corpus.sessions)
     return corpus

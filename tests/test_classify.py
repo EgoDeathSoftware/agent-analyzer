@@ -8,9 +8,10 @@ from __future__ import annotations
 
 import unittest
 
-from sessionkit.classify import (annotate_errors, classify_error, derive_end_state, detect,
-                                 signature)
+from sessionkit.classify import annotate_errors, derive_end_state
+from sessionkit.detectors import detect
 from sessionkit.parse import FileOp, ParsedSession, SysEvent, ToolCall
+from sessionkit.taxonomy import THRESHOLDS, classify_error, signature
 
 
 def _session(**kw) -> ParsedSession:
@@ -47,7 +48,7 @@ class TaxonomyTest(unittest.TestCase):
         ("Exit code 137", "killed"),
         ("<tool_use_error>InputValidationError: Read failed due to the following issue: "
          "The parameter `offset` type is expected as `number` but provided as `string`",
-         "input-validation"),
+         "invalid-args"),
         ("Permission for this action was denied by the Claude Code auto mode classifier. "
          "Reason: [Merge Without Review]", "policy-denied"),
         ("Permission to use Bash with command sudo cp /a /b has been denied.",
@@ -139,6 +140,66 @@ class EndStateTest(unittest.TestCase):
     def test_unknown_when_empty(self) -> None:
         self.assertEqual(derive_end_state(_session())[0], "unknown")
 
+    def test_final_error_turn_is_error_cascade_with_its_text(self) -> None:
+        from sessionkit.parse import Message
+        session = _session()
+        session.messages.append(Message(uuid="u", line=3, ts="", role="assistant",
+                                        stop_reason="error", error_text="rate_limit: slow down"))
+        self.assertEqual(derive_end_state(session), ("error-cascade", "rate_limit: slow down"))
+
+    def test_compaction_in_final_turn_is_compacted_idle(self) -> None:
+        """A compaction after the last user message — within the final turn — is a real signal."""
+        from sessionkit.parse import Message
+        session = _session()
+        session.messages.append(Message(uuid="u1", line=1, ts="", role="user"))
+        session.sysev.append(SysEvent(2, "", "compaction"))
+        session.messages.append(Message(uuid="a1", line=3, ts="", role="assistant"))
+        self.assertEqual(derive_end_state(session)[0], "compacted-idle")
+
+    def test_compaction_before_later_turns_is_complete(self) -> None:
+        """A compaction that happened before the last user message is stale — the session kept
+        going for more turns afterward, so it is not evidence of idling after compaction."""
+        from sessionkit.parse import Message
+        session = _session()
+        session.sysev.append(SysEvent(1, "", "compaction"))
+        session.messages.append(Message(uuid="u1", line=2, ts="", role="user"))
+        session.messages.append(Message(uuid="a1", line=3, ts="", role="assistant"))
+        self.assertEqual(derive_end_state(session)[0], "complete")
+
+    def test_aborted_final_turn(self) -> None:
+        from sessionkit.parse import Message
+        session = _session()
+        session.messages.append(Message(uuid="u", line=2, ts="", role="assistant",
+                                        stop_reason="aborted"))
+        self.assertEqual(derive_end_state(session)[0], "aborted")
+
+    def test_output_truncated_final_turn(self) -> None:
+        from sessionkit.parse import Message
+        session = _session()
+        session.messages.append(Message(uuid="u", line=2, ts="", role="assistant",
+                                        stop_reason="length"))
+        self.assertEqual(derive_end_state(session)[0], "output-truncated")
+
+    def test_agent_unresponsive(self) -> None:
+        from sessionkit.parse import Message
+        session = _session()
+        session.messages.extend([
+            Message(uuid="a", line=83, ts="", role="assistant", stop_reason="aborted"),
+            Message(uuid="u", line=84, ts="", role="user", text_len=5, preview="hello")])
+        self.assertEqual(derive_end_state(session)[0], "agent-unresponsive")
+
+    def test_agent_unresponsive_after_an_errored_turn(self) -> None:
+        from sessionkit.parse import Message
+        for stop, expected in (("error", "agent-unresponsive"), ("end", "interrupted-user")):
+            with self.subTest(stop):
+                session = _session()
+                session.messages.extend([
+                    Message(uuid="a", line=79, ts="", role="assistant", stop_reason=stop,
+                            error_text="Connection error." if stop == "error" else ""),
+                    Message(uuid="u", line=80, ts="", role="user", text_len=5,
+                            preview="hello")])
+                self.assertEqual(derive_end_state(session)[0], expected)
+
 
 class DetectorTest(unittest.TestCase):
     """Each detector fires on its pattern and stays silent otherwise."""
@@ -155,20 +216,21 @@ class DetectorTest(unittest.TestCase):
 
     def test_file_thrash(self) -> None:
         session = _session()
-        session.files.extend(FileOp("/a.py", "edit", "", "t", line=i) for i in range(1, 6))
+        limit = int(THRESHOLDS["file_thrash"])
+        session.files.extend(FileOp("/a.py", "edit", "", "t", line=i) for i in range(1, limit + 1))
         anomaly = next(a for a in detect(session) if a.kind == "file-thrash")
-        self.assertEqual(anomaly.lines, [1, 2, 3, 4, 5])
+        self.assertEqual(anomaly.lines, list(range(1, limit + 1)))
 
     def test_file_thrash_negative(self) -> None:
         session = _session()
-        session.files.extend(FileOp(f"/{i}.py", "edit", "", "t", line=i) for i in range(9))
+        session.files.extend(FileOp(f"/{i}.py", "edit", "", "t", line=i) for i in range(30))
         self.assertNotIn("file-thrash", _kinds(session))
 
     def test_read_loop(self) -> None:
         session = _session()
-        session.files.extend(FileOp("/a.py", "read", "", "t", line=i) for i in range(1, 5))
+        session.files.extend(FileOp("/a.py", "read", "", "t", line=i) for i in range(1, 6))
         anomaly = next(a for a in detect(session) if a.kind == "read-loop")
-        self.assertEqual(anomaly.lines, [1, 2, 3, 4])
+        self.assertEqual(anomaly.lines, [1, 2, 3, 4, 5])
 
     def test_error_cascade_run(self) -> None:
         session = _session()
@@ -199,17 +261,17 @@ class DetectorTest(unittest.TestCase):
 
     def test_compaction_churn(self) -> None:
         session = _session()
-        session.sysev.extend(SysEvent(i, "", "compact_boundary") for i in range(2))
+        session.sysev.extend(SysEvent(i, "", "compaction") for i in range(2))
         self.assertIn("compaction-churn", _kinds(session))
 
     def test_compaction_churn_negative_single(self) -> None:
         session = _session()
-        session.sysev.append(SysEvent(1, "", "compact_boundary"))
+        session.sysev.append(SysEvent(1, "", "compaction"))
         self.assertNotIn("compaction-churn", _kinds(session))
 
     def test_stall(self) -> None:
         session = _session()
-        session.tools.append(_call(1, dur=200_000))
+        session.tools.append(_call(1, name="Read", dur=400_000))
         self.assertIn("stall", _kinds(session))
 
     def test_stall_negative_fast_call(self) -> None:
@@ -235,6 +297,17 @@ class DetectorTest(unittest.TestCase):
         session.files.append(FileOp("/a.py", "read", "", "t", line=1))
         self.assertEqual(detect(session), [])
 
+    def test_orphan_pi_subagent_dispatch_detected(self) -> None:
+        session = _session(tools=[_call(1, name="subagent", err_class="no-result")])
+        anomalies = detect(session)
+        self.assertTrue(any(a.kind == "orphan-subagent" for a in anomalies))
+
+    def test_orphan_claude_code_agent_dispatch_still_detected(self) -> None:
+        # Regression: widening the check must not stop matching the original "Agent" name.
+        session = _session(tools=[_call(1, name="Agent", err_class="no-result")])
+        anomalies = detect(session)
+        self.assertTrue(any(a.kind == "orphan-subagent" for a in anomalies))
+
 
 class AnnotateTest(unittest.TestCase):
     """annotate_errors fills classes in place."""
@@ -252,12 +325,15 @@ class AnomalyHintTest(unittest.TestCase):
     """Every detected anomaly kind has a canned prevention hint (PLAN.md §7 Phase 2)."""
 
     def test_every_detector_kind_has_a_hint(self) -> None:
-        from sessionkit.classify import ANOMALY_HINTS
+        from sessionkit.taxonomy import lookup
         known_kinds = {"repeat-tool", "file-thrash", "read-loop", "error-cascade",
-                      "hook-pingpong", "agent-kill", "orphan-subagent", "compaction-churn",
-                      "stall", "rejection-persist"}
-        self.assertEqual(set(ANOMALY_HINTS), known_kinds)
-        self.assertTrue(all(ANOMALY_HINTS.values()), "every hint must be non-empty")
+                       "hook-pingpong", "agent-kill", "orphan-subagent", "compaction-churn",
+                       "stall", "rejection-persist"}
+        for kind in known_kinds:
+            with self.subTest(kind):
+                entry = lookup(kind)
+                self.assertIsNotNone(entry)
+                self.assertTrue(entry.hint)
 
 
 def _kinds(session: ParsedSession) -> list[str]:

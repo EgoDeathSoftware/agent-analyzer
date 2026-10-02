@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import unittest
 
-from sessionkit.classify import TAIL_SIGNALS, derive_tail_signal
+from sessionkit.classify import TAIL_SIGNALS, derive_tail_signal, tail_text_signal
 from sessionkit.parse import Message, ParsedSession, ToolCall
 
 
@@ -105,6 +105,26 @@ class TailSignalTest(unittest.TestCase):
         self.assertNotEqual(
             derive_tail_signal(session, {10: "Refactored the parser."}),
             "next_step_stated")
+
+    def test_next_step_stated_negative_for_let_me_know(self) -> None:
+        session = _session(messages=[_msg(10, "assistant",
+                                          "Let me know if you want more changes.")])
+        self.assertNotEqual(
+            derive_tail_signal(session, {10: "Let me know if you want more changes."}),
+            "next_step_stated")
+
+    def test_next_step_stated_positive_for_let_me_run(self) -> None:
+        session = _session(messages=[_msg(10, "assistant", "Let me run the tests next.")])
+        self.assertEqual(
+            derive_tail_signal(session, {10: "Let me run the tests next."}),
+            "next_step_stated")
+
+    def test_tail_text_signal_negative_for_let_me_know(self) -> None:
+        self.assertNotEqual(tail_text_signal("Let me know if you want more changes."),
+                            "next_step_stated")
+
+    def test_tail_text_signal_positive_for_let_me_run(self) -> None:
+        self.assertEqual(tail_text_signal("Let me run the tests next."), "next_step_stated")
 
     def test_silent_when_final_turn_is_a_user_prompt(self) -> None:
         session = _session(messages=[_msg(10, "user", "any update?")])

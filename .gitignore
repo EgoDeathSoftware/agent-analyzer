@@ -24,3 +24,6 @@ htmlcov/
 *.swo
 *~
 .tox/
+
+# Real session transcripts for manual dry-run checks; may contain sensitive data
+test/

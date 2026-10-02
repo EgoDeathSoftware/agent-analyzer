@@ -33,7 +33,7 @@ class CorpusTest(unittest.TestCase):
         env_file = self.tmp / "empty.env"
         env_file.write_text("", encoding="utf-8")
         patcher = mock.patch.dict(os.environ, {
-            "CLAUDE_DIR": str(self.home),
+            "CLAUDE_DIR": str(self.home), "PI_DIR": "/nonexistent/pi",
             "SESSIONKIT_ENV": str(env_file),
         })
         patcher.start()
@@ -196,7 +196,8 @@ class QueryTest(unittest.TestCase):
         home.mkdir()
         (tmp / "empty.env").write_text("", encoding="utf-8")
         patcher = mock.patch.dict(os.environ, {
-            "CLAUDE_DIR": str(home), "SESSIONKIT_ENV": str(tmp / "empty.env")})
+            "CLAUDE_DIR": str(home), "PI_DIR": "/nonexistent/pi",
+            "SESSIONKIT_ENV": str(tmp / "empty.env")})
         patcher.start()
         self.addCleanup(patcher.stop)
         # Two tools failing the same number of times, deliberately written in an order that
@@ -251,7 +252,8 @@ class CommandsTest(unittest.TestCase):
         self.home.mkdir()
         (tmp / "empty.env").write_text("", encoding="utf-8")
         patcher = mock.patch.dict(os.environ, {
-            "CLAUDE_DIR": str(self.home), "SESSIONKIT_ENV": str(tmp / "empty.env")})
+            "CLAUDE_DIR": str(self.home), "PI_DIR": "/nonexistent/pi",
+            "SESSIONKIT_ENV": str(tmp / "empty.env")})
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -349,7 +351,8 @@ class HooksTest(unittest.TestCase):
         self.home.mkdir()
         (tmp / "empty.env").write_text("", encoding="utf-8")
         patcher = mock.patch.dict(os.environ, {
-            "CLAUDE_DIR": str(self.home), "SESSIONKIT_ENV": str(tmp / "empty.env")})
+            "CLAUDE_DIR": str(self.home), "PI_DIR": "/nonexistent/pi",
+            "SESSIONKIT_ENV": str(tmp / "empty.env")})
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -446,7 +449,8 @@ class ForensicsTest(unittest.TestCase):
         self.home.mkdir()
         (tmp / "empty.env").write_text("", encoding="utf-8")
         patcher = mock.patch.dict(os.environ, {
-            "CLAUDE_DIR": str(self.home), "SESSIONKIT_ENV": str(tmp / "empty.env")})
+            "CLAUDE_DIR": str(self.home), "PI_DIR": "/nonexistent/pi",
+            "SESSIONKIT_ENV": str(tmp / "empty.env")})
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -461,6 +465,19 @@ class ForensicsTest(unittest.TestCase):
                                           ts=f"2026-08-01T00:00:0{i}Z"))
         records.append(fx.assistant([{"type": "text", "text": "gave up"}],
                                     ts="2026-08-01T00:00:09Z"))
+        fx.write(self.home, records, name="aaaa1111.jsonl")
+
+    def _write_candidate_session(self) -> None:
+        """The looping session, ending on a stated next step (a premature-stop candidate)."""
+        records = [fx.user("do the thing")]
+        for i in range(3):
+            records.append(fx.assistant(
+                [fx.tool_use(f"t{i}", "Bash", {"command": "flaky-check"})],
+                ts=f"2026-08-01T00:00:0{i}Z"))
+            records.append(fx.tool_result(f"t{i}", "still not ready",
+                                          ts=f"2026-08-01T00:00:0{i}Z"))
+        records.append(fx.assistant([{"type": "text", "text": "I'll add the tests next."}],
+                                    ts="2026-08-01T00:00:09Z", stop_reason="end_turn"))
         fx.write(self.home, records, name="aaaa1111.jsonl")
 
     def _args(self, *argv: str):
@@ -514,6 +531,170 @@ class ForensicsTest(unittest.TestCase):
         self.assertIn("(none)", out)
         self.assertIn("succeeded", out)
 
+    def test_findings_carry_tier_family_and_fix_target(self) -> None:
+        self._write_looping_session()
+        entry = next(iter(corpus.load().sessions))
+        repeat = next(f for f in query.forensics_findings(entry) if f["kind"] == "repeat-tool")
+        self.assertEqual((repeat["tier"], repeat["family"], repeat["fix_target"]),
+                         ("S", "loop", "model"))
+
+    def test_candidates_sort_after_structural_findings(self) -> None:
+        self._write_candidate_session()
+        entry = next(iter(corpus.load().sessions))
+        tiers = [f["tier"] for f in query.forensics_findings(entry)]
+        self.assertIn("S->J", tiers)
+        order = ["S", "S->J", "J"]
+        self.assertEqual(tiers, sorted(tiers, key=order.index))
+
+    def test_health_reports_stop_reasons_and_latency(self) -> None:
+        self._write_looping_session()
+        health = query.forensics_health(next(iter(corpus.load().sessions)))
+        self.assertIn("unrecorded", health["stop_reasons"])
+        self.assertIsNotNone(health["median_latency_s"])
+        self.assertEqual(health["compactions"], 0)
+
+    def test_cli_report_has_focus_profile_and_candidate_note(self) -> None:
+        self._write_candidate_session()
+        loaded = corpus.load()
+        out = cli.cmd_forensics(loaded, self._args("forensics", loaded.sessions[0].session.sid))
+        self.assertIn("Focus profile", out)
+        self.assertIn("candidate", out)
+        self.assertIn("premature-stop", out)
+
+    def test_health_counts_stop_reasons_and_empty_turns_per_message_not_per_record(self) -> None:
+        """Claude Code splits one message into per-block records that all carry the message's
+        final stop reason — counting per record would double stop_reasons and empty_turns for
+        a single message (ruling 1)."""
+        records = [fx.user("do the thing")]
+        for ts, block in (("2026-08-01T00:00:01Z", {"type": "thinking", "thinking": "hm"}),
+                          ("2026-08-01T00:00:02Z", {"type": "thinking", "thinking": "hm again"})):
+            record = fx.assistant([block], ts=ts, stop_reason="end_turn")
+            record["message"]["id"] = "msg_01"
+            records.append(record)
+        fx.write(self.home, records, name="aaaa1111.jsonl")
+        entry = next(iter(corpus.load().sessions))
+        health = query.forensics_health(entry)
+        self.assertEqual(health["stop_reasons"], {"end": 1})
+        self.assertEqual(health["empty_turns"], 1)
+
+    def test_median_latency_uses_first_record_of_each_message_only(self) -> None:
+        """Per-block gaps within one Claude Code message must not drag the median down — only
+        the first record of each msg_id group counts (ruling 2)."""
+        records = [fx.user("do the thing")]
+        pairs = [("2026-08-01T00:00:01Z", "m1"), ("2026-08-01T00:00:01.100Z", "m1"),
+                 ("2026-08-01T00:00:11Z", "m2"), ("2026-08-01T00:00:11.100Z", "m2")]
+        for ts, mid in pairs:
+            record = fx.assistant([{"type": "text", "text": "x"}], ts=ts, stop_reason="end_turn")
+            record["message"]["id"] = mid
+            records.append(record)
+        fx.write(self.home, records, name="aaaa1111.jsonl")
+        entry = next(iter(corpus.load().sessions))
+        health = query.forensics_health(entry)
+        # Naive per-record latencies are [1000, 100, 9900, 100]ms (median 550 -> 0s); only the
+        # first record of each group ([1000, 9900]) should count (median 5450 -> 5s).
+        self.assertEqual(health["median_latency_s"], 5)
+
+    def test_focus_profile_marks_referenced_dash_when_ask_has_no_refs(self) -> None:
+        """An expanded turn (one holding a drift-candidate) whose ask named no refs must print
+        '-' for referenced, not 'yes' — Run.referenced defaults True with no refs to check,
+        which would otherwise misleadingly say 'yes' (ruling 3)."""
+        records = [
+            fx.user("do the thing"),
+            fx.assistant([fx.tool_use("t1", "Bash", {"command": "ls"})],
+                        ts="2026-08-01T00:00:01Z"),
+            fx.tool_result("t1", "ok", ts="2026-08-01T00:00:01Z"),
+            fx.user("[Request interrupted by user]", ts="2026-08-01T00:00:02Z"),
+            fx.user("try something else", ts="2026-08-01T00:00:03Z"),
+        ]
+        fx.write(self.home, records, name="aaaa1111.jsonl")
+        entry = next(iter(corpus.load().sessions))
+        self.assertTrue(any(a.kind == "drift-candidate" for a in entry.anomalies))
+        rows = query.focus_profile_rows(entry)
+        expanded = [r for r in rows if r["run"] != "-"]
+        self.assertTrue(expanded)
+        self.assertTrue(all(r["referenced"] == "-" for r in expanded))
+
+    def test_focus_profile_drops_zero_call_turns(self) -> None:
+        """Real sessions have many user turns with no tool calls (plain chat); they must not
+        print as an all-zero summary row (ruling 1)."""
+        records = [
+            fx.user("first ask"),
+            fx.assistant([fx.tool_use("t1", "Bash", {"command": "ls"})],
+                        ts="2026-08-01T00:00:01Z"),
+            fx.tool_result("t1", "ok", ts="2026-08-01T00:00:01Z"),
+            fx.user("just chatting", ts="2026-08-01T00:00:02Z"),
+            fx.assistant([{"type": "text", "text": "sure"}], ts="2026-08-01T00:00:03Z"),
+        ]
+        fx.write(self.home, records, name="aaaa1111.jsonl")
+        entry = next(iter(corpus.load().sessions))
+        rows = query.focus_profile_rows(entry)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["calls"], 1)
+
+    def test_health_not_omitted_from_json_on_a_long_session(self) -> None:
+        """Health used to render last, after Findings/Focus/Timeline could exhaust the budget
+        on a long session; it now renders right after Findings and must never be the section
+        that silently disappears (ruling 1)."""
+        records: list[dict] = []
+        for i in range(300):
+            minute, second = divmod(i, 60)
+            ts = f"2026-08-01T00:{minute:02d}:{second:02d}Z"
+            records.append(fx.user(f"turn {i}", ts=ts))
+            records.append(fx.assistant(
+                [fx.tool_use(f"t{i}", "Bash", {"command": f"cmd{i}"})], ts=ts))
+            records.append(fx.tool_result(f"t{i}", "ok", ts=ts))
+        fx.write(self.home, records, name="aaaa1111.jsonl")
+        loaded = corpus.load()
+        sid = loaded.sessions[0].session.sid
+        out = cli.cmd_forensics(loaded, self._args("forensics", "--json", sid))
+        doc = json.loads(out)
+        self.assertNotIn("health", doc.get("omitted", {}))
+
+    def test_reasoning_ratio_is_none_when_no_reasoning_recorded(self) -> None:
+        """Current Claude Code redacts thinking text, so reasoning_len is 0 for most sessions;
+        a ratio of 0 would misleadingly suggest no reasoning happened rather than that it
+        cannot be told apart from redacted (ruling 2)."""
+        self._write_looping_session()
+        health = query.forensics_health(next(iter(corpus.load().sessions)))
+        self.assertIsNone(health["reasoning_ratio"])
+
+    def test_health_table_formats_reasoning_ratio_with_two_decimals(self) -> None:
+        records = [
+            fx.user("do it"),
+            fx.assistant([{"type": "thinking", "thinking": "x" * 10},
+                         {"type": "text", "text": "y" * 30}],
+                        ts="2026-08-01T00:00:01Z", stop_reason="end_turn"),
+        ]
+        fx.write(self.home, records, name="aaaa1111.jsonl")
+        loaded = corpus.load()
+        sid = loaded.sessions[0].session.sid
+        health = query.forensics_health(loaded.sessions[0])
+        self.assertEqual(health["reasoning_ratio"], 0.33)
+        out = cli.cmd_forensics(loaded, self._args("forensics", sid))
+        self.assertIn("0.33", out)
+        self.assertNotIn("0.3300", out)
+
+    def test_focus_profile_prints_dash_for_a_referenced_run_with_no_paths(self) -> None:
+        """A referenced ask with a same-turn run that touches no paths at all (e.g. a bare
+        exec command) must print '-', not 'yes' — Run.referenced defaults True when there is
+        nothing to check it against (ruling 3)."""
+        records = [fx.user("check notes.md")]
+        for i in range(8):
+            ts = f"2026-08-01T00:00:{i:02d}Z"
+            records.append(fx.assistant(
+                [fx.tool_use(f"r{i}", "Read",
+                             {"file_path": f"/home/dev/myproject/other/f{i}.py"})], ts=ts))
+            records.append(fx.tool_result(f"r{i}", "content", ts=ts))
+        records.append(fx.assistant([fx.tool_use("b1", "Bash", {"command": "date"})],
+                                    ts="2026-08-01T00:00:08Z"))
+        records.append(fx.tool_result("b1", "Tue", ts="2026-08-01T00:00:08Z"))
+        fx.write(self.home, records, name="aaaa1111.jsonl")
+        entry = next(iter(corpus.load().sessions))
+        self.assertTrue(any(a.kind == "drift-candidate" for a in entry.anomalies))
+        rows = query.focus_profile_rows(entry)
+        bash_row = next(r for r in rows if r["run"] == "exec:date")
+        self.assertEqual(bash_row["referenced"], "-")
+
 
 class ShowSkillsTest(unittest.TestCase):
     """query.skill_rows and the Skills section of `sk show --mode summary`."""
@@ -526,7 +707,8 @@ class ShowSkillsTest(unittest.TestCase):
         self.home.mkdir()
         (tmp / "empty.env").write_text("", encoding="utf-8")
         patcher = mock.patch.dict(os.environ, {
-            "CLAUDE_DIR": str(self.home), "SESSIONKIT_ENV": str(tmp / "empty.env")})
+            "CLAUDE_DIR": str(self.home), "PI_DIR": "/nonexistent/pi",
+            "SESSIONKIT_ENV": str(tmp / "empty.env")})
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -589,7 +771,8 @@ class ChildrenTest(unittest.TestCase):
         self.home.mkdir()
         (tmp / "empty.env").write_text("", encoding="utf-8")
         patcher = mock.patch.dict(os.environ, {
-            "CLAUDE_DIR": str(self.home), "SESSIONKIT_ENV": str(tmp / "empty.env")})
+            "CLAUDE_DIR": str(self.home), "PI_DIR": "/nonexistent/pi",
+            "SESSIONKIT_ENV": str(tmp / "empty.env")})
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -663,7 +846,8 @@ class CostTest(unittest.TestCase):
         self.home.mkdir()
         (tmp / "empty.env").write_text("", encoding="utf-8")
         patcher = mock.patch.dict(os.environ, {
-            "CLAUDE_DIR": str(self.home), "SESSIONKIT_ENV": str(tmp / "empty.env")})
+            "CLAUDE_DIR": str(self.home), "PI_DIR": "/nonexistent/pi",
+            "SESSIONKIT_ENV": str(tmp / "empty.env")})
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -765,7 +949,7 @@ class IndexColumnsTest(unittest.TestCase):
         env_file = self.tmp / "empty.env"
         env_file.write_text("", encoding="utf-8")
         patcher = mock.patch.dict(os.environ, {
-            "CLAUDE_DIR": str(self.home),
+            "CLAUDE_DIR": str(self.home), "PI_DIR": "/nonexistent/pi",
             "SESSIONKIT_ENV": str(env_file),
         })
         patcher.start()
@@ -815,7 +999,8 @@ class ShowFullTest(unittest.TestCase):
         self.home.mkdir()
         (tmp / "empty.env").write_text("", encoding="utf-8")
         patcher = mock.patch.dict(os.environ, {
-            "CLAUDE_DIR": str(self.home), "SESSIONKIT_ENV": str(tmp / "empty.env")})
+            "CLAUDE_DIR": str(self.home), "PI_DIR": "/nonexistent/pi",
+            "SESSIONKIT_ENV": str(tmp / "empty.env")})
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -835,6 +1020,132 @@ class ShowFullTest(unittest.TestCase):
         full = cli.cmd_show(loaded, self._args("show", sid, "--mode", "tools", "--full"))
         self.assertNotIn(long_arg, capped)
         self.assertIn(long_arg, full)
+
+
+class FindingsFleetTest(unittest.TestCase):
+    """`sk findings` and the model/harness groupings: rates, not raw counts."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        tmp = Path(self._tmp.name)
+        self.home = tmp / "claude"
+        self.home.mkdir()
+        (tmp / "empty.env").write_text("", encoding="utf-8")
+        patcher = mock.patch.dict(os.environ, {
+            "CLAUDE_DIR": str(self.home), "PI_DIR": "/nonexistent/pi",
+            "SESSIONKIT_ENV": str(tmp / "empty.env")})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        looping = [fx.user("do the thing")]
+        for i in range(3):
+            looping.append(fx.assistant([fx.tool_use(f"t{i}", "Bash", {"command": "check"})],
+                                        ts=f"2026-08-01T00:00:0{i}Z", model="claude-opus-5"))
+            looping.append(fx.tool_result(f"t{i}", "not ready", ts=f"2026-08-01T00:00:0{i}Z"))
+        fx.write(self.home, looping, name="aaaa1111.jsonl")
+        fx.write(self.home, [
+            fx.user("check it"),
+            fx.assistant([fx.tool_use("u1", "Bash", {"command": "false"})],
+                         model="claude-sonnet-5"),
+            fx.tool_result("u1", "Exit code 1", is_error=True),
+            fx.assistant([{"type": "text", "text": "ok"}], ts="2026-08-01T00:00:05Z",
+                         model="claude-sonnet-5"),
+        ], name="bbbb2222.jsonl")
+        self.loaded = corpus.load()
+
+    def _args(self, *argv: str):
+        return cli.build_parser().parse_args(list(argv))
+
+    def test_rates_by_model(self) -> None:
+        rows = {r["group"]: r for r in query.findings_rows(self.loaded, query.Filter(), "model",
+                                                           kind="repeat-tool")}
+        self.assertEqual(rows["claude-opus-5"]["rate"], 1.0)
+        self.assertEqual(rows["claude-sonnet-5"]["rate"], 0.0)
+        self.assertEqual(rows["claude-sonnet-5"]["sessions_in_group"], 1)
+
+    def test_by_kind_uses_the_whole_scope_as_denominator(self) -> None:
+        rows = {r["kind"]: r for r in query.findings_rows(self.loaded, query.Filter(), "kind")}
+        self.assertEqual(rows["repeat-tool"]["sessions_affected"], 1)
+        self.assertEqual(rows["repeat-tool"]["sessions_in_group"], 2)
+        self.assertEqual(rows["repeat-tool"]["tier"], "S")
+
+    def test_tier_filter_keeps_matching_kind_and_excludes_others(self) -> None:
+        kept = {r["kind"]: r for r in query.findings_rows(self.loaded, query.Filter(), "kind",
+                                                          tier="S")}
+        self.assertIn("repeat-tool", kept)
+        excluded = {r["kind"]: r for r in query.findings_rows(self.loaded, query.Filter(), "kind",
+                                                              tier="J")}
+        self.assertNotIn("repeat-tool", excluded)
+
+    def test_family_filter_keeps_matching_kind_and_excludes_others(self) -> None:
+        kept = {r["kind"]: r for r in query.findings_rows(self.loaded, query.Filter(), "kind",
+                                                          family="loop")}
+        self.assertIn("repeat-tool", kept)
+        excluded = {r["kind"]: r for r in query.findings_rows(self.loaded, query.Filter(), "kind",
+                                                              family="generation")}
+        self.assertNotIn("repeat-tool", excluded)
+
+    def test_tier_and_family_filter_non_kind_grouping(self) -> None:
+        rows = {r["group"]: r for r in query.findings_rows(self.loaded, query.Filter(), "model",
+                                                           tier="S", family="loop")}
+        self.assertEqual(rows["claude-opus-5"]["sessions_affected"], 1)
+        excluded = {r["group"]: r for r in query.findings_rows(self.loaded, query.Filter(),
+                                                               "model", tier="J")}
+        self.assertEqual(excluded["claude-opus-5"]["sessions_affected"], 0)
+
+    def test_index_filter_by_finding(self) -> None:
+        rows = query.index_rows(self.loaded, query.Filter(finding="repeat-tool"))
+        self.assertEqual([r["sid"] for r in rows],
+                         [e.session.sid for e in self.loaded.sessions
+                          if any(a.kind == "repeat-tool" for a in e.anomalies)])
+        self.assertEqual(len(rows), 1)
+
+    def test_cli_findings_report(self) -> None:
+        out = cli.cmd_findings(self.loaded, self._args("findings", "--group-by", "model"))
+        self.assertIn("claude-opus-5", out)
+        self.assertIn("rate", out)
+
+    def test_cli_errors_by_harness_shows_reach(self) -> None:
+        out = cli.cmd_errors(self.loaded, self._args("errors", "--group-by", "harness"))
+        self.assertIn("claude-code", out)
+        self.assertIn("reach", out)
+        self.assertIn("50.0%", out)
+
+    def test_cli_errors_by_model_drops_fix_and_exemplar_adds_sessions_in_group(self) -> None:
+        out = cli.cmd_errors(self.loaded, self._args("errors", "--group-by", "model"))
+        self.assertIn("sessions_in_group", out)
+        self.assertNotIn("exemplar", out)
+
+    def test_cli_index_finding_ignores_default_since_window(self) -> None:
+        """The fixture sessions are dated 2026-08-01, well outside index's default 3-day
+        window; --finding alone must search the whole corpus, not that window (ruling 4)."""
+        looping = next(e for e in self.loaded.sessions
+                       if any(a.kind == "repeat-tool" for a in e.anomalies))
+        out = cli.cmd_index(self.loaded, self._args("index", "--finding", "repeat-tool"))
+        self.assertIn(looping.session.sid[:8], out)
+
+    def test_cli_findings_by_session_skips_fewer_than_ten_note(self) -> None:
+        """Every session grouping has exactly one session per group, so the note would fire
+        unconditionally and say nothing useful (ruling 6)."""
+        out = cli.cmd_findings(self.loaded, self._args("findings", "--group-by", "session"))
+        self.assertNotIn("fewer than 10 sessions", out)
+
+    def test_unknown_finding_kind_counts_as_tier_s_consistently(self) -> None:
+        """A finding kind absent from the taxonomy must count as tier S in both the by-kind
+        view and the tier filter — not tier '' in one and dropped by any --tier filter in the
+        other (ruling 7)."""
+        from sessionkit.detectors.base import Anomaly
+        entry = self.loaded.sessions[0]
+        entry.anomalies.append(Anomaly("totally-unknown-kind", "unrecognised", 1, [1]))
+        by_kind = {r["kind"]: r for r in query.findings_rows(self.loaded, query.Filter(), "kind")}
+        self.assertEqual(by_kind["totally-unknown-kind"]["tier"], "S")
+        self.assertEqual(by_kind["totally-unknown-kind"]["family"], "")
+        tier_s = {r["kind"] for r in query.findings_rows(self.loaded, query.Filter(), "kind",
+                                                         tier="S")}
+        self.assertIn("totally-unknown-kind", tier_s)
+        tier_j = {r["kind"] for r in query.findings_rows(self.loaded, query.Filter(), "kind",
+                                                         tier="J")}
+        self.assertNotIn("totally-unknown-kind", tier_j)
 
 
 if __name__ == "__main__":  # pragma: no cover

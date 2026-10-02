@@ -84,6 +84,19 @@ Bucket on `tail_signal` (from step 1) crossed with the uncommitted count (from s
 | `completion_marker` | 0 | any | **Probably done** |
 | any, `state` is `killed-agents` or `interrupted-user` | 0 | any | **Sunk** (close) |
 
+The candidate's `state` (its `end_state`) refines the bucket. Apply it after the table:
+
+| `state` | What happened | Treatment |
+|---|---|---|
+| `interrupted-tool` | a tool call never returned | as the `mid_tool` row |
+| `error-cascade` | ended on consecutive failing calls, or an API error | **Review before resuming** — the fix may be the environment, not more prompting |
+| `aborted` | the final model turn was aborted (pi, Esc) | a deliberate stop: **Sunk** if no dirty files, else **Review before resuming** |
+| `output-truncated` | the final turn hit the output token limit | cut off mid-answer, not finished: **Resume now** if dirty files, else **Review before resuming**; suggest a narrower ask |
+| `agent-unresponsive` | the user's last message got no reply after an errored or aborted turn | the user is waiting: **Resume now** if dirty files, else **Review before resuming**; quote the unanswered message |
+| `compacted-idle` | went idle after a context compaction | context was summarised; **Review before resuming** and say the resumed session starts from the summary |
+| `interrupted-user` | last turn is a user message with no reply | as the table: **Sunk** if clean |
+| `killed-agents` | a subagent was killed before returning | **Sunk**, as in the table |
+
 A candidate that matches none of these rows (e.g. `next_step_stated` with no dirty files, or
 `mid_tool` but stale) still gets reported — put it in **Review before resuming** rather than
 dropping it; the table is a starting heuristic, not an exhaustive partition.

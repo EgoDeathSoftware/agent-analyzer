@@ -183,5 +183,114 @@ class KeyTest(unittest.TestCase):
         self.assertTrue(digest({"x": object()}))
 
 
+class ParseFeaturesTest(unittest.TestCase):
+    """Parse-time features: visible vs reasoning text, stop reasons, API errors, refs."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+
+    def parse(self, records: list[dict]) -> "object":
+        return parse_file(fx.write(self.tmp, records), "host")
+
+    def _last(self, *blocks: dict, **kw):
+        session = self.parse([fx.user("go"), fx.assistant(list(blocks), **kw)])
+        return session.messages[-1]
+
+    def test_reasoning_is_not_visible_text(self) -> None:
+        message = self._last({"type": "thinking", "thinking": "secret plan"},
+                             {"type": "text", "text": "All done"}, stop_reason="end_turn")
+        self.assertEqual(message.preview, "All done")
+        self.assertEqual(message.text_len, len("All done"))
+        self.assertEqual(message.reasoning_len, len("secret plan"))
+        self.assertEqual(message.stop_reason, "end")
+
+    def test_stop_reason_mapping(self) -> None:
+        text = {"type": "text", "text": "x"}
+        self.assertEqual(self._last(text, stop_reason="max_tokens").stop_reason, "length")
+        self.assertEqual(self._last(text, stop_reason="tool_use").stop_reason, "tool_use")
+        self.assertEqual(self._last(text).stop_reason, "")
+
+    def test_api_error_message(self) -> None:
+        message = self._last({"type": "text", "text": "API Error: Rate limit reached"},
+                             stop_reason="stop_sequence", model="<synthetic>",
+                             isApiErrorMessage=True, error="rate_limit")
+        self.assertEqual(message.stop_reason, "error")
+        self.assertIn("rate_limit", message.error_text)
+        self.assertIn("Rate limit reached", message.error_text)
+
+    def test_synthetic_model_does_not_replace_the_session_model(self) -> None:
+        session = self.parse([
+            fx.user("go"),
+            fx.assistant([{"type": "text", "text": "ok"}], model="claude-opus-5"),
+            fx.assistant([{"type": "text", "text": "API Error: 529"}],
+                         ts="2026-08-01T00:00:05Z", model="<synthetic>",
+                         isApiErrorMessage=True, error="server_error"),
+        ])
+        self.assertEqual(session.model, "claude-opus-5")
+
+    def test_msg_id_is_the_api_message_id(self) -> None:
+        records = [fx.user("go")]
+        for ts, block in (("2026-08-01T00:00:01Z", {"type": "thinking", "thinking": "hm"}),
+                          ("2026-08-01T00:00:02Z", {"type": "text", "text": "ok"})):
+            record = fx.assistant([block], ts=ts, stop_reason="end_turn")
+            record["message"]["id"] = "msg_01"
+            records.append(record)
+        session = self.parse(records)
+        self.assertEqual([m.msg_id for m in session.messages], ["", "msg_01", "msg_01"])
+
+    def test_is_prompt_marks_only_real_user_prompts(self) -> None:
+        texts = ["fix the build", "<local-command-caveat>Caveat: generated locally.",
+                 "<task-notification><task-id>t1</task-id>", "<command-name>/clear</command-name>",
+                 "<local-command-stdout>ok</local-command-stdout>",
+                 "<system-reminder>note</system-reminder>",
+                 '<teammate-message teammate_id="team-lead">do the thing</teammate-message>',
+                 "Another Claude session sent a message: "
+                 '<teammate-message teammate_id="x">do another thing</teammate-message>']
+        records = [fx.user(text, ts=f"2026-08-01T00:00:0{i}Z") for i, text in enumerate(texts)]
+        records.append(fx.user("Continue from where you left off.", ts="2026-08-01T00:00:09Z",
+                               isMeta=True))
+        session = self.parse(records)
+        self.assertEqual([m.is_prompt for m in session.messages],
+                         [True, False, False, False, False, False, False, False, False])
+
+    def test_tool_calls_counted(self) -> None:
+        message = self._last(fx.tool_use("t1", "Read", {"file_path": "/a"}),
+                             fx.tool_use("t2", "Read", {"file_path": "/b"}))
+        self.assertEqual(message.tool_calls, 2)
+
+    def test_markup_leak_and_repeat_ratio(self) -> None:
+        leak = self._last({"type": "text", "text": '<tool_call>{"name": "Read"}</tool_call>'})
+        self.assertEqual(leak.markup_leak, "tool_call-xml")
+        loop = self._last({"type": "thinking",
+                           "thinking": "I will set up the profile file with defaults now. " * 30})
+        self.assertGreater(loop.repeat_ratio, 0.5)
+
+    def test_user_refs(self) -> None:
+        session = self.parse([fx.user("fix `parse_file` in sessionkit/parse.py")])
+        self.assertEqual(session.messages[0].refs, ["parse_file", "sessionkit/parse.py"])
+
+    def test_compaction_is_normalised(self) -> None:
+        session = self.parse([fx.user("go"),
+                              fx.system("compact_boundary",
+                                        compactMetadata={"trigger": "auto", "preTokens": 1000})])
+        self.assertEqual([(e.subtype, e.detail) for e in session.sysev],
+                         [("compaction", "auto:1000")])
+
+    def test_last_line_malformed(self) -> None:
+        path = fx.write(self.tmp, fx.simple_session())
+        self.assertFalse(parse_file(path, "host").last_line_malformed)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write('{"type": "assist')
+        self.assertTrue(parse_file(path, "host").last_line_malformed)
+
+    def test_harness_final_text_and_claim(self) -> None:
+        session = self.parse(fx.simple_session())
+        self.assertEqual(session.harness, "claude-code")
+        self.assertEqual(session.final_text, "done")
+        self.assertTrue(session.messages[-1].claims_done)
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
